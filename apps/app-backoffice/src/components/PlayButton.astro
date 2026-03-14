@@ -1,0 +1,26 @@
+---
+interface Props {
+  filename: string;
+  username: string;
+  query: string;
+  text: string | null;
+  duration: number;
+}
+
+const { filename, username, query, text, duration } = Astro.props;
+---
+
+<button
+  type="button"
+  aria-label={`Reproducir clip de ${username}`}
+  class="play-btn inline-flex items-center justify-center w-10 h-10 rounded-lg bg-brand-subtle text-brand hover:bg-brand hover:text-white transition-colors cursor-pointer"
+  data-filename={filename}
+  data-username={username}
+  data-query={query}
+  data-text={text ?? ""}
+  data-duration={duration}
+>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4" aria-hidden="true">
+    <path d="M6.3 2.84A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.27l9.344-5.891a1.5 1.5 0 000-2.538L6.3 2.841z" />
+  </svg>
+</button>

@@ -1,0 +1,211 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import PlayButton from "@/components/PlayButton.astro";
+import {
+  getSession,
+  getSessionChunks,
+  getSessionClips,
+  getSessionTopicScores,
+} from "@/lib/db";
+import type { SessionDetail, ChunkRow, ClipRow } from "@/lib/db";
+import { normalizeScores } from "@/lib/topics";
+import type { TopicScore } from "@/lib/topics";
+
+const id = Number(Astro.params.id);
+
+if (isNaN(id)) {
+  return Astro.redirect("/sesiones");
+}
+
+let session: SessionDetail | null = null;
+let chunks: ChunkRow[] = [];
+let clips: ClipRow[] = [];
+let topics: TopicScore[] = [];
+let error: string | null = null;
+
+try {
+  session = getSession(id);
+  if (!session) {
+    return Astro.redirect("/sesiones");
+  }
+  chunks = getSessionChunks(id);
+  clips = getSessionClips(id);
+
+  // Read pre-computed topic scores
+  try {
+    const rawScores = getSessionTopicScores(id);
+    if (rawScores.length > 0) {
+      topics = normalizeScores(
+        rawScores.map((r) => ({ id: r.topic, rawScore: r.max_score })),
+      );
+    }
+  } catch {
+    // session_topics table may not exist yet
+  }
+} catch (e) {
+  error = e instanceof Error ? e.message : "Error al cargar la sesión";
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return s > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatScore(score: number): string {
+  return `${Math.round(score * 100)}%`;
+}
+
+// Summary paragraphs from pre-generated summary
+const summaryParagraphs = (session?.summary ?? "").split(/\n\n+/).filter((p: string) => p.trim());
+
+const dateDisplay = session?.date?.split("T")[0] ?? "";
+const timeDisplay = session?.date?.split("T")[1]?.slice(0, 5) ?? "";
+---
+
+<Layout title={session ? `${session.username} — ${dateDisplay}` : "Sesión"}>
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">Error</p>
+      <p class="text-error/70 text-sm">{error}</p>
+      <a href="/sesiones" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Volver</a>
+    </div>
+  ) : session && (
+    <>
+      {/* Header */}
+      <div class="mb-8">
+        <a href="/sesiones" class="text-sm text-text-muted hover:text-text-secondary transition-colors mb-3 inline-flex items-center gap-1">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true">
+            <path fill-rule="evenodd" d="M9.78 4.22a.75.75 0 010 1.06L7.06 8l2.72 2.72a.75.75 0 11-1.06 1.06L5.47 8.53a.75.75 0 010-1.06l3.25-3.25a.75.75 0 011.06 0z" clip-rule="evenodd" />
+          </svg>
+          Sesiones
+        </a>
+        <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <h1 class="text-2xl font-bold text-text-primary">{session.username}</h1>
+          <span class="text-text-secondary text-lg">{dateDisplay}</span>
+          {timeDisplay && <span class="text-text-muted text-sm">{timeDisplay}hs</span>}
+        </div>
+        <div class="flex flex-wrap items-center gap-4 mt-2 text-sm text-text-secondary">
+          <span>{formatDuration(session.duration_seconds)}</span>
+          <span>{chunks.length} chunks</span>
+          <span>{clips.length} clips</span>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left column: Topics + Summary */}
+        <div class="lg:col-span-1 space-y-6">
+          {/* Topic Ranking */}
+          <section class="bg-card rounded-xl border border-border p-5">
+            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Presencia de Topics</h2>
+            {topics.length > 0 ? (
+              <div class="space-y-3">
+                {topics.map((topic) => (
+                  <div>
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="text-sm font-medium text-text-primary">{topic.label}</span>
+                      <span class="text-xs font-mono tabular-nums text-text-muted">{Math.round(topic.normalizedScore)}%</span>
+                    </div>
+                    <div class="h-2.5 rounded-full bg-surface-raised overflow-hidden">
+                      <div
+                        class="h-full rounded-full transition-all duration-500"
+                        style={`width: ${Math.max(topic.normalizedScore, 3)}%; background: ${topic.color};`}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p class="text-sm text-text-muted">Sin embeddings disponibles</p>
+            )}
+          </section>
+
+          {/* Summary */}
+          <section class="bg-card rounded-xl border border-border p-5">
+            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3">Resumen</h2>
+            {summaryParagraphs.length > 0 ? (
+              <div class="space-y-3">
+                {summaryParagraphs.map((p) => (
+                  <p class="text-sm text-text-secondary leading-relaxed">{p}</p>
+                ))}
+              </div>
+            ) : (
+              <p class="text-sm text-text-muted">Sin resumen disponible</p>
+            )}
+          </section>
+
+          {/* Clips */}
+          {clips.length > 0 && (
+            <section class="bg-card rounded-xl border border-border p-5">
+              <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3">
+                Clips <span class="text-text-muted font-normal normal-case">({clips.length})</span>
+              </h2>
+              <div class="space-y-2">
+                {clips.map((clip) => (
+                  <div class="flex items-center gap-3 p-2 rounded-lg hover:bg-card-hover transition-colors">
+                    <PlayButton
+                      filename={clip.filename}
+                      username={clip.username}
+                      query={clip.query}
+                      text={clip.text}
+                      duration={clip.end_seconds - clip.start_seconds}
+                    />
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2">
+                        <span class="inline-block bg-brand-subtle text-brand rounded-md px-1.5 py-0.5 text-xs font-medium">{clip.query}</span>
+                        <span class="text-xs text-text-muted font-mono tabular-nums">{formatScore(clip.score)}</span>
+                      </div>
+                      <p class="text-xs text-text-secondary mt-0.5 truncate">{clip.text ?? "—"}</p>
+                    </div>
+                    <span class="text-xs text-text-muted tabular-nums whitespace-nowrap">
+                      {formatTime(clip.start_seconds)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+
+        {/* Right column: Transcript */}
+        <section class="lg:col-span-2 bg-card rounded-xl border border-border">
+          <div class="p-5 border-b border-border">
+            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider">
+              Transcripción <span class="text-text-muted font-normal normal-case">({chunks.length} fragmentos)</span>
+            </h2>
+          </div>
+          <div class="divide-y divide-border max-h-[70vh] overflow-y-auto">
+            {chunks.map((chunk) => (
+              <div class="px-5 py-3 hover:bg-card-hover transition-colors group">
+                <div class="flex items-start gap-3">
+                  <span class="text-xs font-mono text-text-muted tabular-nums pt-0.5 w-14 shrink-0">
+                    {formatTime(chunk.start_seconds)}
+                  </span>
+                  <p class="text-sm text-text-secondary leading-relaxed flex-1">{chunk.text}</p>
+                </div>
+              </div>
+            ))}
+            {chunks.length === 0 && (
+              <div class="p-8 text-center text-text-muted">
+                <p>Sin transcripción disponible para esta sesión</p>
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+    </>
+  )}
+</Layout>

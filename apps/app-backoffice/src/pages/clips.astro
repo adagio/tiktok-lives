@@ -1,0 +1,100 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import ClipsTable from "@/components/ClipsTable.astro";
+import { getClips, getAuthors, getQueries, getModes } from "@/lib/db";
+import type { ClipRow } from "@/lib/db";
+
+const url = Astro.url;
+const author = url.searchParams.get("author") || "";
+const query = url.searchParams.get("query") || "";
+const mode = url.searchParams.get("mode") || "";
+
+const filters: Record<string, string> = {};
+if (author) filters.author = author;
+if (query) filters.query = query;
+if (mode) filters.mode = mode;
+
+let clips: ClipRow[] = [];
+let authors: string[] = [];
+let queries: string[] = [];
+let modes: string[] = [];
+let error: string | null = null;
+
+try {
+  clips = getClips(filters);
+  authors = getAuthors();
+  queries = getQueries();
+  modes = getModes();
+} catch (e) {
+  error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
+}
+---
+
+<Layout title="Clips">
+  <h1 class="text-2xl font-bold text-text-primary mb-6">Todos los Clips</h1>
+
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">No se pudieron cargar los clips</p>
+      <p class="text-error/70 text-sm">Verificá que <code class="bg-error-subtle px-1.5 py-0.5 rounded">clips.db</code> exista y tenga datos.</p>
+      <a href="/clips" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Reintentar</a>
+    </div>
+  ) : (
+    <>
+      <form method="get" class="grid grid-cols-1 sm:grid-cols-2 md:flex md:flex-wrap items-end gap-3 mb-6" role="search" aria-label="Filtrar clips">
+        <div>
+          <label for="filter-author" class="sr-only">Autor</label>
+          <select id="filter-author" name="author" class="w-full md:w-auto rounded-lg border border-border bg-card px-3 py-2 text-sm text-text-primary min-h-[44px]">
+            <option value="">Todos los autores</option>
+            {authors.map((a) => (
+              <option value={a} selected={a === author}>{a}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label for="filter-query" class="sr-only">Búsqueda</label>
+          <select id="filter-query" name="query" class="w-full md:w-auto rounded-lg border border-border bg-card px-3 py-2 text-sm text-text-primary min-h-[44px]">
+            <option value="">Todas las búsquedas</option>
+            {queries.map((q) => (
+              <option value={q} selected={q === query}>{q}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label for="filter-mode" class="sr-only">Modo de búsqueda</label>
+          <select id="filter-mode" name="mode" class="w-full md:w-auto rounded-lg border border-border bg-card px-3 py-2 text-sm text-text-primary min-h-[44px]">
+            <option value="">Todos los modos</option>
+            {modes.map((m) => (
+              <option value={m} selected={m === mode}>{m}</option>
+            ))}
+          </select>
+        </div>
+
+        <div class="flex gap-3 sm:col-span-2 md:col-span-1">
+          <button
+            type="submit"
+            class="flex-1 md:flex-none rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover transition-colors min-h-[44px]"
+          >
+            Aplicar filtros
+          </button>
+
+          {(author || query || mode) && (
+            <a href="/clips" class="flex-1 md:flex-none rounded-lg border border-border px-4 py-2 text-sm text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors min-h-[44px] inline-flex items-center justify-center">
+              Limpiar filtros
+            </a>
+          )}
+        </div>
+      </form>
+
+      <p class="text-sm text-text-secondary mb-4" aria-live="polite">{clips.length} clip{clips.length !== 1 ? "s" : ""} encontrado{clips.length !== 1 ? "s" : ""}</p>
+
+      <div class="bg-card rounded-xl border border-border">
+        <ClipsTable clips={clips} />
+      </div>
+    </>
+  )}
+</Layout>

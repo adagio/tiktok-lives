@@ -1,0 +1,64 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import StatsCards from "@/components/StatsCards.astro";
+import TopicsSummary from "@/components/TopicsSummary.astro";
+import ClipsTable from "@/components/ClipsTable.astro";
+import { getStats, getClips, getGlobalTopicScores } from "@/lib/db";
+import { normalizeScores } from "@/lib/topics";
+import type { Stats, ClipRow } from "@/lib/db";
+import type { TopicScore } from "@/lib/topics";
+
+let stats: Stats = { totalClips: 0, totalSessions: 0, uniqueAuthors: 0, uniqueQueries: 0 };
+let recentClips: ClipRow[] = [];
+let globalTopics: TopicScore[] = [];
+let error: string | null = null;
+
+try {
+  stats = getStats();
+  recentClips = getClips({ limit: 10 });
+  try {
+    const rawScores = getGlobalTopicScores();
+    globalTopics = normalizeScores(
+      rawScores.map((r) => ({ id: r.topic, rawScore: r.max_score })),
+    );
+  } catch {
+    // session_topics table may not exist yet — silently skip
+  }
+} catch (e) {
+  error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
+}
+---
+
+<Layout title="Inicio">
+  <h1 class="text-2xl font-bold text-text-primary mb-6">Inicio</h1>
+
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">No se pudieron cargar los clips</p>
+      <p class="text-error/70 text-sm">Verificá que <code class="bg-error-subtle px-1.5 py-0.5 rounded">clips.db</code> exista y tenga datos.</p>
+      <a href="/" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Reintentar</a>
+    </div>
+  ) : (
+    <>
+      <StatsCards stats={stats} />
+
+      <div class="mt-6">
+        <TopicsSummary topics={globalTopics} />
+      </div>
+
+      <div class="mt-8">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold text-text-primary">Últimos clips</h2>
+          <a href="/clips" class="text-sm text-brand hover:text-brand-hover transition-colors">
+            Ver todos &rarr;
+          </a>
+        </div>
+        <div class="bg-card rounded-xl border border-border">
+          <ClipsTable clips={recentClips} />
+        </div>
+      </div>
+    </>
+  )}
+</Layout>

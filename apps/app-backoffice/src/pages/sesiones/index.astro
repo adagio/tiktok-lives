@@ -1,0 +1,158 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import { getSessions, getSessionAuthors } from "@/lib/db";
+import type { SessionRow } from "@/lib/db";
+
+const url = Astro.url;
+const author = url.searchParams.get("author") || "";
+
+let sessions: SessionRow[] = [];
+let authors: string[] = [];
+let error: string | null = null;
+
+try {
+  sessions = getSessions(author || undefined);
+  authors = getSessionAuthors();
+} catch (e) {
+  error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return s > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatDate(dateStr: string): string {
+  return dateStr;
+}
+
+function formatIndexedAt(ts: string): string {
+  return ts.replace("T", " ").replace(/\.\d+$/, "");
+}
+---
+
+<Layout title="Sesiones">
+  <h1 class="text-2xl font-bold text-text-primary mb-6">Sesiones</h1>
+
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">No se pudieron cargar las sesiones</p>
+      <p class="text-error/70 text-sm">Verificá que <code class="bg-error-subtle px-1.5 py-0.5 rounded">clips.db</code> exista y tenga datos.</p>
+      <a href="/sesiones" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Reintentar</a>
+    </div>
+  ) : (
+    <>
+      <form method="get" class="flex flex-wrap items-end gap-3 mb-6" role="search" aria-label="Filtrar sesiones">
+        <div>
+          <label for="filter-author" class="sr-only">Autor</label>
+          <select id="filter-author" name="author" class="w-full md:w-auto rounded-lg border border-border bg-card px-3 py-2 text-sm text-text-primary min-h-[44px]">
+            <option value="">Todos los autores</option>
+            {authors.map((a) => (
+              <option value={a} selected={a === author}>{a}</option>
+            ))}
+          </select>
+        </div>
+
+        <div class="flex gap-3">
+          <button
+            type="submit"
+            class="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover transition-colors min-h-[44px]"
+          >
+            Aplicar filtro
+          </button>
+
+          {author && (
+            <a href="/sesiones" class="rounded-lg border border-border px-4 py-2 text-sm text-text-secondary hover:text-text-primary hover:border-text-muted transition-colors min-h-[44px] inline-flex items-center justify-center">
+              Limpiar filtro
+            </a>
+          )}
+        </div>
+      </form>
+
+      <p class="text-sm text-text-secondary mb-4" aria-live="polite">{sessions.length} sesión{sessions.length !== 1 ? "es" : ""} encontrada{sessions.length !== 1 ? "s" : ""}</p>
+
+      <div class="bg-card rounded-xl border border-border">
+        <!-- Desktop: full table -->
+        <div class="hidden md:block overflow-x-auto">
+          <table class="w-full text-sm text-left">
+            <thead>
+              <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+                <th scope="col" class="py-3 px-3">#</th>
+                <th scope="col" class="py-3 px-3">Autor</th>
+                <th scope="col" class="py-3 px-3">Fecha</th>
+                <th scope="col" class="py-3 px-3">Duración</th>
+                <th scope="col" class="py-3 px-3">Chunks</th>
+                <th scope="col" class="py-3 px-3">Clips</th>
+                <th scope="col" class="py-3 px-3">Indexado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.map((session) => (
+                <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150 cursor-pointer" onclick={`window.location='/sesiones/${session.id}'`}>
+                  <td class="py-2.5 px-3 text-text-muted tabular-nums">{session.id}</td>
+                  <td class="py-2.5 px-3 font-medium text-text-primary">{session.username}</td>
+                  <td class="py-2.5 px-3 text-text-secondary">{formatDate(session.date)}</td>
+                  <td class="py-2.5 px-3 text-text-secondary tabular-nums">{formatDuration(session.duration_seconds)}</td>
+                  <td class="py-2.5 px-3 text-text-secondary tabular-nums">{session.chunk_count}</td>
+                  <td class="py-2.5 px-3 text-text-secondary tabular-nums">
+                    {session.clip_count > 0 ? (
+                      <span class="inline-block bg-brand-subtle text-brand rounded-md px-2 py-0.5 text-xs font-medium">{session.clip_count}</span>
+                    ) : (
+                      <span class="text-text-muted">0</span>
+                    )}
+                  </td>
+                  <td class="py-2.5 px-3 text-text-muted text-xs">{formatIndexedAt(session.indexed_at)}</td>
+                </tr>
+              ))}
+              {sessions.length === 0 && (
+                <tr>
+                  <td colspan="7" class="py-12 text-center text-text-muted">
+                    <p class="text-base mb-1">Sin resultados</p>
+                    <p class="text-xs">No hay sesiones grabadas{author ? ` para ${author}` : ""}</p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Mobile: card layout -->
+        <div class="md:hidden divide-y divide-border">
+          {sessions.map((session) => (
+            <a href={`/sesiones/${session.id}`} class="block p-4 hover:bg-card-hover transition-[background-color] duration-150">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-medium text-text-primary text-sm">{session.username}</span>
+                    <span class="text-xs text-text-secondary">{formatDate(session.date)}</span>
+                  </div>
+                  <div class="flex items-center gap-3 mt-1.5 text-xs text-text-secondary">
+                    <span class="tabular-nums">{formatDuration(session.duration_seconds)}</span>
+                    <span>{session.chunk_count} chunks</span>
+                    {session.clip_count > 0 ? (
+                      <span class="inline-block bg-brand-subtle text-brand rounded-md px-2 py-0.5 font-medium">{session.clip_count} clips</span>
+                    ) : (
+                      <span class="text-text-muted">0 clips</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </a>
+          ))}
+          {sessions.length === 0 && (
+            <div class="py-12 text-center text-text-muted">
+              <p class="text-base mb-1">Sin resultados</p>
+              <p class="text-xs">No hay sesiones grabadas{author ? ` para ${author}` : ""}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  )}
+</Layout>

@@ -1,0 +1,32 @@
+---
+import type { Stats } from "@/lib/db";
+import type { IconName } from "./Icon.astro";
+import Icon from "./Icon.astro";
+
+interface Props {
+  stats: Stats;
+}
+
+const { stats } = Astro.props;
+
+const cards: { label: string; value: number; color: string; icon: IconName }[] = [
+  { label: "Clips", value: stats.totalClips, color: "text-brand", icon: "play" },
+  { label: "Sesiones", value: stats.totalSessions, color: "text-accent-cyan", icon: "video" },
+  { label: "Autores", value: stats.uniqueAuthors, color: "text-accent-pink", icon: "user" },
+  { label: "Búsquedas", value: stats.uniqueQueries, color: "text-accent-orange", icon: "search" },
+];
+---
+
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+  {cards.map((card) => (
+    <div class="bg-card rounded-xl border border-border p-4 hover:border-brand/30 transition-colors">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs font-medium uppercase tracking-wider text-text-muted">{card.label}</span>
+        <span class={card.color}>
+          <Icon name={card.icon} />
+        </span>
+      </div>
+      <p class="text-3xl font-bold text-text-primary tabular-nums">{card.value}</p>
+    </div>
+  ))}
+</div>

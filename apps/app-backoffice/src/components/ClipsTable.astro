@@ -1,0 +1,122 @@
+---
+import type { ClipRow } from "@/lib/db";
+import PlayButton from "./PlayButton.astro";
+
+interface Props {
+  clips: ClipRow[];
+}
+
+const { clips } = Astro.props;
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function formatDuration(start: number, end: number): string {
+  const secs = Math.round(end - start);
+  if (secs >= 60) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  return `${secs}s`;
+}
+
+function formatScore(score: number): string {
+  return `${Math.round(score * 100)}%`;
+}
+
+function truncate(text: string | null, max: number): string {
+  if (!text) return "—";
+  return text.length > max ? text.slice(0, max) + "..." : text;
+}
+---
+
+<!-- Desktop: full table -->
+<div class="hidden md:block overflow-x-auto">
+  <table class="w-full text-sm text-left">
+    <thead>
+      <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+        <th scope="col" class="py-3 px-3">#</th>
+        <th scope="col" class="py-3 px-3">Autor</th>
+        <th scope="col" class="py-3 px-3">Fecha</th>
+        <th scope="col" class="py-3 px-3">Búsqueda</th>
+        <th scope="col" class="py-3 px-3">Modo</th>
+        <th scope="col" class="py-3 px-3">Relevancia</th>
+        <th scope="col" class="py-3 px-3">Rango</th>
+        <th scope="col" class="py-3 px-3">Duración</th>
+        <th scope="col" class="py-3 px-3 max-w-xs">Transcripción</th>
+        <th scope="col" class="py-3 px-3"><span class="sr-only">Reproducir</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      {clips.map((clip) => (
+        <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150">
+          <td class="py-2.5 px-3 text-text-muted tabular-nums">{clip.id}</td>
+          <td class="py-2.5 px-3 font-medium text-text-primary">{clip.username}</td>
+          <td class="py-2.5 px-3 text-text-secondary">{clip.date ?? "—"}</td>
+          <td class="py-2.5 px-3">
+            <span class="inline-block bg-brand-subtle text-brand rounded-md px-2 py-0.5 text-xs font-medium">
+              {clip.query}
+            </span>
+          </td>
+          <td class="py-2.5 px-3 text-text-secondary">{clip.search_mode}</td>
+          <td class="py-2.5 px-3 font-mono text-accent-cyan tabular-nums" title={`Score: ${clip.score.toFixed(4)}`}>{formatScore(clip.score)}</td>
+          <td class="py-2.5 px-3 text-text-secondary whitespace-nowrap tabular-nums">
+            {formatTime(clip.start_seconds)}–{formatTime(clip.end_seconds)}
+          </td>
+          <td class="py-2.5 px-3 text-text-secondary tabular-nums">{formatDuration(clip.start_seconds, clip.end_seconds)}</td>
+          <td class="py-2.5 px-3 text-text-secondary max-w-xs" title={clip.text ?? ""}>
+            {truncate(clip.text, 80)}
+          </td>
+          <td class="py-2.5 px-3">
+            <PlayButton filename={clip.filename} username={clip.username} query={clip.query} text={clip.text} duration={clip.end_seconds - clip.start_seconds} />
+          </td>
+        </tr>
+      ))}
+      {clips.length === 0 && (
+        <tr>
+          <td colspan="10" class="py-12 text-center text-text-muted">
+            <p class="text-base mb-1">Sin resultados</p>
+            <p class="text-xs">Probá ajustando los filtros o ejecutando una nueva búsqueda con <code class="bg-surface-raised px-1.5 py-0.5 rounded text-text-secondary">find_clips.py</code></p>
+          </td>
+        </tr>
+      )}
+    </tbody>
+  </table>
+</div>
+
+<!-- Mobile: card layout -->
+<div class="md:hidden divide-y divide-border">
+  {clips.map((clip) => (
+    <article class="p-4 hover:bg-card-hover transition-[background-color] duration-150">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-medium text-text-primary text-sm">{clip.username}</span>
+            <span class="inline-block bg-brand-subtle text-brand rounded-md px-2 py-0.5 text-xs font-medium">{clip.query}</span>
+            <span class="text-xs text-text-muted">{clip.search_mode}</span>
+          </div>
+          <div class="flex items-center gap-3 mt-1.5 text-xs text-text-secondary">
+            <span>{clip.date ?? "—"}</span>
+            <span class="font-mono text-accent-cyan">{formatScore(clip.score)}</span>
+            <span class="tabular-nums">{formatTime(clip.start_seconds)}–{formatTime(clip.end_seconds)}</span>
+            <span>{formatDuration(clip.start_seconds, clip.end_seconds)}</span>
+          </div>
+        </div>
+        <PlayButton filename={clip.filename} username={clip.username} query={clip.query} text={clip.text} duration={clip.end_seconds - clip.start_seconds} />
+      </div>
+      {clip.text && (
+        <p class="mt-2 text-xs text-text-secondary line-clamp-2">{clip.text}</p>
+      )}
+    </article>
+  ))}
+  {clips.length === 0 && (
+    <div class="py-12 text-center text-text-muted">
+      <p class="text-base mb-1">Sin resultados</p>
+      <p class="text-xs">Probá ajustando los filtros o ejecutando una nueva búsqueda</p>
+    </div>
+  )}
+</div>

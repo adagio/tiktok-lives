@@ -1,0 +1,118 @@
+---
+import Sidebar from "@/components/Sidebar.astro";
+import ThemeToggle from "@/components/ThemeToggle.astro";
+import Logo from "@/components/Logo.astro";
+import VideoOverlay from "@/components/VideoOverlay.astro";
+import "@/styles/index.css";
+
+interface Props {
+  title: string;
+}
+
+const { title } = Astro.props;
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23a855f7'/><path d='M38 28v44l36-22z' fill='white'/></svg>" />
+    <title>{title} — Clips Explorer</title>
+    <!-- Prevent FOUC: always apply a theme class before render -->
+    <script is:inline>
+      (function() {
+        var saved = localStorage.getItem('theme');
+        var theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.classList.add(theme);
+      })();
+    </script>
+  </head>
+  <body class="bg-surface min-h-screen text-text-primary">
+    <!-- Mobile top bar -->
+    <header class="fixed top-0 left-0 right-0 h-14 bg-sidebar text-white flex items-center justify-between px-4 z-20 md:hidden border-b border-border">
+      <Logo class="text-sm" />
+      <div class="flex items-center gap-1">
+        <ThemeToggle />
+        <button
+          id="menu-toggle"
+          aria-label="Abrir menu"
+          aria-expanded="false"
+          aria-controls="sidebar"
+          class="w-11 h-11 inline-flex items-center justify-center rounded-lg text-text-secondary hover:bg-sidebar-hover hover:text-text-primary transition-colors"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Overlay -->
+    <div id="sidebar-overlay" class="fixed inset-0 bg-black/60 z-20 hidden md:hidden" aria-hidden="true"></div>
+
+    <div class="flex min-h-screen">
+      <Sidebar currentPath={Astro.url.pathname} />
+      <main class="flex-1 p-4 pt-18 md:pt-8 md:p-8 md:ml-56">
+        <slot />
+      </main>
+    </div>
+
+    <!-- Theme toggle logic (icons handled by CSS, no FOUC) -->
+    <script>
+      function getEffectiveTheme(): 'dark' | 'light' {
+        const html = document.documentElement;
+        if (html.classList.contains('light')) return 'light';
+        if (html.classList.contains('dark')) return 'dark';
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+
+      function setTheme(theme: 'dark' | 'light') {
+        document.documentElement.classList.remove('dark', 'light');
+        document.documentElement.classList.add(theme);
+        localStorage.setItem('theme', theme);
+      }
+
+      document.querySelectorAll('[data-theme-toggle]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          setTheme(getEffectiveTheme() === 'dark' ? 'light' : 'dark');
+        });
+      });
+    </script>
+
+    <VideoOverlay />
+
+    <!-- Sidebar menu logic -->
+    <script>
+      const toggle = document.getElementById('menu-toggle');
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebar-overlay');
+
+      function openMenu() {
+        sidebar?.classList.remove('-translate-x-full');
+        overlay?.classList.remove('hidden');
+        toggle?.setAttribute('aria-expanded', 'true');
+        toggle?.setAttribute('aria-label', 'Cerrar menu');
+      }
+
+      function closeMenu() {
+        sidebar?.classList.add('-translate-x-full');
+        overlay?.classList.add('hidden');
+        toggle?.setAttribute('aria-expanded', 'false');
+        toggle?.setAttribute('aria-label', 'Abrir menu');
+      }
+
+      toggle?.addEventListener('click', () => {
+        const expanded = toggle.getAttribute('aria-expanded') === 'true';
+        expanded ? closeMenu() : openMenu();
+      });
+
+      overlay?.addEventListener('click', closeMenu);
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeMenu();
+      });
+    </script>
+  </body>
+</html>

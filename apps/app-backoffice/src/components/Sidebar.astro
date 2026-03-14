@@ -1,0 +1,45 @@
+---
+import { menuItems } from "@/data/sidebar-menu";
+import Icon from "./Icon.astro";
+import Logo from "./Logo.astro";
+import ThemeToggle from "./ThemeToggle.astro";
+
+interface Props {
+  currentPath: string;
+}
+
+const { currentPath } = Astro.props;
+---
+
+<aside
+  id="sidebar"
+  class="fixed left-0 top-0 h-full w-56 bg-sidebar text-white flex flex-col z-30 transition-transform -translate-x-full md:translate-x-0 border-r border-border"
+  aria-label="Barra lateral"
+>
+  <div class="px-5 py-4 border-b border-border/20">
+    <Logo />
+  </div>
+  <nav class="flex-1 py-3 px-2" aria-label="Menu principal">
+    {menuItems.map((item) => {
+      const active = currentPath === item.href;
+      return (
+        <a
+          href={item.href}
+          aria-current={active ? "page" : undefined}
+          class:list={[
+            "flex items-center gap-3 px-3 py-2.5 text-sm rounded-lg mb-0.5 transition-colors",
+            active
+              ? "bg-brand-subtle text-brand font-medium"
+              : "text-text-secondary hover:bg-sidebar-hover hover:text-text-primary",
+          ]}
+        >
+          <Icon name={item.icon} />
+          <span>{item.label}</span>
+        </a>
+      );
+    })}
+  </nav>
+  <div class="px-3 py-3 border-t border-border/20">
+    <ThemeToggle class="w-full justify-start gap-3 px-3 py-2.5 text-sm" showLabel />
+  </div>
+</aside>

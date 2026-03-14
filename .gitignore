@@ -1,0 +1,26 @@
+# Recorded material (videos .ts, 7GB+)
+material/
+
+# Extracted clips (.mp4)
+clips/
+
+# SQLite database (local data)
+clips.db
+clips.db-shm
+clips.db-wal
+
+# Environment variables (secrets)
+.env
+
+# Python virtual environment
+.venv/
+
+# Build artifacts
+lives.egg-info/
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code local settings
+.claude/settings.local.json

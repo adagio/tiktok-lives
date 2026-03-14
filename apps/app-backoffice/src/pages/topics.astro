@@ -1,0 +1,189 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import TopicHeatmap from "@/components/TopicHeatmap.astro";
+import {
+  getGlobalTopicScores,
+  getHeatmapData,
+  getTopicHighlights,
+} from "@/lib/db";
+import type { TopicHighlightRow } from "@/lib/db";
+import { TOPIC_META, TOPIC_IDS, normalizeScores } from "@/lib/topics";
+import type { TopicScore } from "@/lib/topics";
+
+let globalTopics: TopicScore[] = [];
+let heatmapData: ReturnType<typeof getHeatmapData> = [];
+let highlights: Record<string, TopicHighlightRow[]> = {};
+let error: string | null = null;
+
+// Hex colors for conic-gradient (CSS vars don't work in gradients easily)
+const topicHexColors: Record<string, string> = {
+  risas: "#fb923c",
+  baile: "#f472b6",
+  bromas: "#22d3ee",
+  reflexion: "#34d399",
+  guinos: "#a855f7",
+  besos: "#f9a8d4",
+};
+
+try {
+  const rawScores = getGlobalTopicScores();
+  globalTopics = normalizeScores(
+    rawScores.map((r) => ({ id: r.topic, rawScore: r.max_score })),
+  );
+  heatmapData = getHeatmapData();
+  for (const tid of TOPIC_IDS) {
+    highlights[tid] = getTopicHighlights(tid, 5);
+  }
+} catch (e) {
+  error = e instanceof Error ? e.message : "Error al cargar datos de topics";
+}
+
+function formatTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+---
+
+<Layout title="Topics">
+  <h1 class="text-2xl font-bold text-text-primary mb-6">Topics</h1>
+
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">Error</p>
+      <p class="text-error/70 text-sm">{error}</p>
+    </div>
+  ) : (
+    <>
+      {/* A. Global Ranking */}
+      <section class="mb-8">
+        <h2 class="text-lg font-semibold text-text-primary mb-4">Ranking global</h2>
+        {globalTopics.length > 0 ? (
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {globalTopics.map((topic) => {
+              const hex = topicHexColors[topic.id] || "#888";
+              const pct = Math.round(topic.normalizedScore);
+              const deg = Math.round((pct / 100) * 360);
+              return (
+                <div class="bg-card rounded-xl border border-border p-4 flex flex-col items-center gap-3 hover:border-brand/30 transition-colors">
+                  <div
+                    class="radial-score"
+                    style={`--deg: ${deg}deg; --color: ${hex};`}
+                  >
+                    <span class="radial-value">{pct}</span>
+                  </div>
+                  <span class="text-sm font-semibold text-text-primary">{topic.label}</span>
+                  <span class="text-xs text-text-muted font-mono tabular-nums">
+                    raw {topic.rawScore.toFixed(3)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p class="text-sm text-text-muted">Sin datos de topics. Ejecutá <code class="bg-surface-raised px-1.5 py-0.5 rounded text-xs">analyze_topics.py</code> primero.</p>
+        )}
+      </section>
+
+      {/* B. Heatmap */}
+      <section class="mb-8">
+        <h2 class="text-lg font-semibold text-text-primary mb-4">Heatmap de presencia</h2>
+        <div class="bg-card rounded-xl border border-border p-5">
+          <TopicHeatmap data={heatmapData} />
+        </div>
+      </section>
+
+      {/* C. Top moments per topic */}
+      <section>
+        <h2 class="text-lg font-semibold text-text-primary mb-4">Top momentos por topic</h2>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {TOPIC_IDS.map((tid) => {
+            const meta = TOPIC_META[tid];
+            const hex = topicHexColors[tid] || "#888";
+            const items = highlights[tid] || [];
+            return (
+              <div class="bg-card rounded-xl border border-border p-5">
+                <h3 class="text-sm font-semibold text-text-primary mb-3 flex items-center gap-2">
+                  <span class="inline-block w-2.5 h-2.5 rounded-full" style={`background: ${hex};`} />
+                  {meta.label}
+                </h3>
+                {items.length > 0 ? (
+                  <div class="space-y-2">
+                    {items.map((item) => (
+                      <a
+                        href={`/sesiones/${item.session_id}`}
+                        class="block p-2.5 rounded-lg hover:bg-card-hover transition-colors group"
+                      >
+                        <div class="flex items-center gap-2 mb-1">
+                          <span class="text-xs text-text-muted font-mono tabular-nums">
+                            {formatTime(item.start_seconds)}–{formatTime(item.end_seconds)}
+                          </span>
+                          <span class="text-xs font-mono tabular-nums" style={`color: ${hex};`}>
+                            {item.score.toFixed(3)}
+                          </span>
+                          <span class="ml-auto text-xs text-text-muted">
+                            {item.username} · {item.date?.split("T")[0]}
+                          </span>
+                        </div>
+                        <p class="text-xs text-text-secondary leading-relaxed line-clamp-2 group-hover:text-text-primary transition-colors">
+                          {item.text ?? "—"}
+                        </p>
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <p class="text-xs text-text-muted">Sin highlights</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    </>
+  )}
+</Layout>
+
+<style>
+  .radial-score {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    background: conic-gradient(
+      var(--color) 0deg,
+      var(--color) var(--deg),
+      var(--color-surface-raised) var(--deg),
+      var(--color-surface-raised) 360deg
+    );
+  }
+
+  .radial-score::before {
+    content: "";
+    position: absolute;
+    inset: 5px;
+    border-radius: 50%;
+    background: var(--color-card);
+  }
+
+  .radial-value {
+    position: relative;
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: var(--color-text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>

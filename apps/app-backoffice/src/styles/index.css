@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@theme {
+  /* Brand */
+  --color-brand: #a855f7;
+  --color-brand-hover: #9333ea;
+  --color-brand-subtle: rgba(168, 85, 247, 0.12);
+
+  /* Accents (dark defaults) */
+  --color-accent-cyan: #22d3ee;
+  --color-accent-orange: #fb923c;
+  --color-accent-pink: #f472b6;
+  --color-accent-green: #34d399;
+
+  /* Dark theme (default) */
+  --color-surface: #0c0c10;
+  --color-surface-raised: #13131a;
+  --color-card: #1a1a24;
+  --color-card-hover: #22222e;
+  --color-border: #2a2a38;
+  --color-sidebar: #101016;
+  --color-sidebar-hover: #1a1a24;
+
+  /* Text */
+  --color-text-primary: #f0f0f4;
+  --color-text-secondary: #88889a;
+  --color-text-muted: #77778a;
+
+  /* Semantic */
+  --color-error: #f87171;
+  --color-error-subtle: rgba(248, 113, 113, 0.1);
+}
+
+/* Light theme — applied via .light class (set by FOUC script or toggle) */
+html.light {
+  --color-surface: #f4f4f8;
+  --color-surface-raised: #eeeef2;
+  --color-card: #ffffff;
+  --color-card-hover: #f8f8fb;
+  --color-border: #dddde4;
+  --color-sidebar: #18181f;
+  --color-sidebar-hover: #24242e;
+  --color-text-primary: #111118;
+  --color-text-secondary: #55556e;
+  --color-text-muted: #88889a;
+  --color-accent-cyan: #0891b2;
+  --color-accent-orange: #ea580c;
+  --color-accent-pink: #db2777;
+  --color-accent-green: #059669;
+  --color-brand-subtle: rgba(168, 85, 247, 0.08);
+  --color-error: #dc2626;
+  --color-error-subtle: rgba(220, 38, 38, 0.06);
+}
+
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+}
+
+/* Focus indicators */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* Visually hidden */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Text clamp */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
