@@ -2,14 +2,20 @@
 export const prerender = false;
 
 import Layout from "@/layouts/Layout.astro";
+import LocalTime from "@/components/LocalTime.astro";
 import PlayButton from "@/components/PlayButton.astro";
 import {
   getSession,
+  getSessionBattles,
   getSessionChunks,
   getSessionClips,
+  getSessionGuests,
   getSessionTopicScores,
+  getSessionChatMessages,
+  getLatestViewerJoin,
+  isSessionActive,
 } from "@/lib/db";
-import type { SessionDetail, ChunkRow, ClipRow } from "@/lib/db";
+import type { SessionDetail, ChunkRow, ClipRow, BattleRow, GuestRow, ChatMessageRow } from "@/lib/db";
 import { normalizeScores } from "@/lib/topics";
 import type { TopicScore } from "@/lib/topics";
 
@@ -22,7 +28,12 @@ if (isNaN(id)) {
 let session: SessionDetail | null = null;
 let chunks: ChunkRow[] = [];
 let clips: ClipRow[] = [];
+let battles: BattleRow[] = [];
+let guests: GuestRow[] = [];
 let topics: TopicScore[] = [];
+let chatMessages: ChatMessageRow[] = [];
+let chatActive = false;
+let latestJoin: { username: string; joined_at: string } | null = null;
 let error: string | null = null;
 
 try {
@@ -32,6 +43,17 @@ try {
   }
   chunks = getSessionChunks(id);
   clips = getSessionClips(id);
+  battles = getSessionBattles(id);
+  guests = getSessionGuests(id);
+
+  // Read chat messages (filter out legacy __join__ rows)
+  try {
+    chatMessages = getSessionChatMessages(id).filter((m) => m.text !== "__join__");
+    chatActive = isSessionActive(id);
+  } catch {
+    // chat_messages table may not exist yet
+  }
+  latestJoin = getLatestViewerJoin(id);
 
   // Read pre-computed topic scores
   try {
@@ -69,11 +91,25 @@ function formatScore(score: number): string {
   return `${Math.round(score * 100)}%`;
 }
 
+function formatGuestDuration(joinedAt: string, leftAt: string | null): string | null {
+  if (!leftAt) return null;
+  const ms = new Date(leftAt).getTime() - new Date(joinedAt).getTime();
+  if (isNaN(ms) || ms < 0) return null;
+  const totalSecs = Math.floor(ms / 1000);
+  const m = Math.floor(totalSecs / 60);
+  const s = totalSecs % 60;
+  if (m > 0) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  return `${s}s`;
+}
+
 // Summary paragraphs from pre-generated summary
 const summaryParagraphs = (session?.summary ?? "").split(/\n\n+/).filter((p: string) => p.trim());
 
+const lastChatTimestamp = chatMessages.length > 0
+  ? chatMessages[chatMessages.length - 1].timestamp
+  : "";
+
 const dateDisplay = session?.date?.split("T")[0] ?? "";
-const timeDisplay = session?.date?.split("T")[1]?.slice(0, 5) ?? "";
 ---
 
 <Layout title={session ? `${session.username} — ${dateDisplay}` : "Sesión"}>
@@ -95,8 +131,7 @@ const timeDisplay = session?.date?.split("T")[1]?.slice(0, 5) ?? "";
         </a>
         <div class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
           <h1 class="text-2xl font-bold text-text-primary">{session.username}</h1>
-          <span class="text-text-secondary text-lg">{dateDisplay}</span>
-          {timeDisplay && <span class="text-text-muted text-sm">{timeDisplay}hs</span>}
+          <LocalTime utc={session.date} fmt="datetime" class="text-text-secondary text-lg" />
         </div>
         <div class="flex flex-wrap items-center gap-4 mt-2 text-sm text-text-secondary">
           <span>{formatDuration(session.duration_seconds)}</span>
@@ -130,6 +165,101 @@ const timeDisplay = session?.date?.split("T")[1]?.slice(0, 5) ?? "";
               </div>
             ) : (
               <p class="text-sm text-text-muted">Sin embeddings disponibles</p>
+            )}
+          </section>
+
+          {/* Batallas */}
+          <section class="bg-card rounded-xl border border-border p-5">
+            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4 flex items-center gap-2">
+              <span class="text-lg">⚔️</span> Batallas
+              {battles.length > 0 && (
+                <span class="text-text-muted font-normal normal-case text-xs">({battles.length})</span>
+              )}
+            </h2>
+            {battles.length > 0 ? (
+              <div class="space-y-3">
+                {battles.map((b) => {
+                  const won = b.host_score > b.opponent_score;
+                  const lost = b.host_score < b.opponent_score;
+                  const draw = b.host_score === b.opponent_score && (b.host_score > 0 || b.opponent_score > 0);
+                  const resultLabel = won ? "W" : lost ? "L" : draw ? "D" : "";
+                  const resultColor = won
+                    ? "text-emerald-400 bg-emerald-500/15 border-emerald-500/30"
+                    : lost
+                      ? "text-rose-400 bg-rose-500/15 border-rose-500/30"
+                      : "text-amber-400 bg-amber-500/15 border-amber-500/30";
+                  const detectedAt = b.detected_at;
+                  return (
+                    <a href={`/batallas/${b.id}`} class="flex items-center gap-3 p-3 rounded-lg bg-surface-raised/50 border border-border/50 hover:border-brand/30 transition-colors">
+                      {resultLabel && (
+                        <span class={`shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold border ${resultColor}`}>
+                          {resultLabel}
+                        </span>
+                      )}
+                      <div class="min-w-0 flex-1">
+                        <span class="text-sm font-semibold text-text-primary">@{b.opponent_username}</span>
+                        <div class="flex items-center gap-2 mt-0.5">
+                          <span class="text-xs font-mono tabular-nums text-text-secondary">
+                            {b.host_score} — {b.opponent_score}
+                          </span>
+                          {detectedAt && (
+                            <LocalTime utc={detectedAt} fmt="time" class="text-xs text-text-muted" />
+                          )}
+                        </div>
+                      </div>
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4 text-text-muted shrink-0" aria-hidden="true">
+                        <path fill-rule="evenodd" d="M6.22 4.22a.75.75 0 011.06 0l3.25 3.25a.75.75 0 010 1.06l-3.25 3.25a.75.75 0 01-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 010-1.06z" clip-rule="evenodd" />
+                      </svg>
+                    </a>
+                  );
+                })}
+              </div>
+            ) : (
+              <p class="text-sm text-text-muted">Sin batallas detectadas</p>
+            )}
+          </section>
+
+          {/* Ventanilla (guests) */}
+          <section class="bg-card rounded-xl border border-border p-5">
+            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4 flex items-center gap-2">
+              <span class="text-lg">🎙️</span> Ventanilla
+              {guests.length > 0 && (
+                <span class="text-text-muted font-normal normal-case text-xs">({guests.length})</span>
+              )}
+            </h2>
+            {guests.length > 0 ? (
+              <div class="space-y-3">
+                {guests.map((g) => {
+                  const isLive = !g.left_at;
+                  const duration = formatGuestDuration(g.joined_at, g.left_at);
+                  const joinedAt = g.joined_at;
+                  return (
+                    <div class="flex items-center gap-3 p-3 rounded-lg bg-surface-raised/50 border border-border/50 hover:border-border transition-colors">
+                      {isLive && (
+                        <span class="shrink-0 relative flex h-2.5 w-2.5">
+                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                        </span>
+                      )}
+                      <div class="min-w-0 flex-1">
+                        <span class="text-sm font-semibold text-text-primary">@{g.username}</span>
+                        <div class="flex items-center gap-2 mt-0.5">
+                          {joinedAt && (
+                            <LocalTime utc={joinedAt} fmt="time" class="text-xs text-text-muted" />
+                          )}
+                          {isLive ? (
+                            <span class="text-xs font-medium text-emerald-400">en vivo</span>
+                          ) : duration && (
+                            <span class="text-xs text-text-muted font-mono tabular-nums">{duration}</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p class="text-sm text-text-muted">Sin invitados en esta sesión</p>
             )}
           </section>
 
@@ -205,7 +335,242 @@ const timeDisplay = session?.date?.split("T")[1]?.slice(0, 5) ?? "";
             )}
           </div>
         </section>
+
+        {/* Chat */}
+        <section class="lg:col-span-2 bg-card rounded-xl border border-border">
+          <div class="p-5 border-b border-border flex items-center gap-3">
+            <span class="text-lg">💬</span>
+            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider">
+              Chat <span id="chat-count" class="text-text-muted font-normal normal-case">({chatMessages.length} mensajes)</span>
+            </h2>
+            {chatActive && (
+              <span id="chat-live-badge" class="chat-live-badge">
+                <span class="chat-live-dot" />
+                EN VIVO
+              </span>
+            )}
+          </div>
+          <div id="chat-panel" class="max-h-[50vh] overflow-y-auto p-3 space-y-1 chat-panel">
+            {chatMessages.length > 0 ? chatMessages.map((msg) => (
+              <div class="chat-msg">
+                <time data-utc={msg.timestamp} data-fmt="time" class="chat-ts">{msg.timestamp.split("T")[1]?.slice(0, 5) ?? ""}</time>
+                <span class="chat-user">{msg.username}</span>
+                <span class="chat-text">{msg.text}</span>
+              </div>
+            )) : (
+              <p class="text-sm text-text-muted text-center py-8">Sin mensajes de chat en esta sesión</p>
+            )}
+          </div>
+
+          {/* Update line — latest status event */}
+          <div id="update-line" class="update-line">
+            {latestJoin && (
+              <span>👋 {latestJoin.username} se unió</span>
+            )}
+          </div>
+
+          {/* Hidden data for polling */}
+          <div id="session-chat-data" class="hidden"
+            data-session-id={id}
+            data-active={chatActive ? "true" : "false"}
+            data-last-ts={lastChatTimestamp}
+          />
+        </section>
       </div>
     </>
   )}
 </Layout>
+
+<style>
+  .chat-live-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 9999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.25);
+  }
+
+  .chat-live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #f87171;
+    animation: pulse-dot 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .chat-panel {
+    min-height: 200px;
+  }
+
+  .update-line {
+    padding: 6px 12px;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    border-top: 1px solid var(--color-border);
+    height: 30px;
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+  }
+</style>
+
+<style is:global>
+  #chat-panel .chat-msg {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+  }
+
+  #chat-panel .chat-msg:hover {
+    background: var(--color-card-hover);
+  }
+
+  #chat-panel .chat-ts {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-muted);
+    opacity: 0.6;
+  }
+
+  #chat-panel .chat-user {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--color-accent-cyan);
+    font-size: 0.75rem;
+  }
+
+  #chat-panel .chat-text {
+    color: var(--color-text-secondary);
+    word-break: break-word;
+  }
+
+  #chat-panel .chat-msg-new {
+    animation: msg-fade-in 0.3s ease-out;
+  }
+
+  @keyframes msg-fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+
+<script is:inline>
+(function() {
+  var el = document.getElementById('session-chat-data');
+  if (!el) return;
+
+  var sessionId = el.dataset.sessionId;
+  var lastTs = el.dataset.lastTs || '';
+  var msgCount = document.querySelectorAll('#chat-panel .chat-msg').length;
+
+  function isNearBottom(p) {
+    if (!p) return true;
+    return p.scrollHeight - p.scrollTop - p.clientHeight < 60;
+  }
+
+  function scrollToBottom(p) {
+    if (p) p.scrollTop = p.scrollHeight;
+  }
+
+  scrollToBottom(document.getElementById('chat-panel'));
+
+  var timeFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  function appendMsg(msg) {
+    var panel = document.getElementById('chat-panel');
+    if (!panel) return;
+    if (msg.text === '__join__') return; // legacy rows — skip
+
+    var div = document.createElement('div');
+    div.className = 'chat-msg chat-msg-new';
+
+    var ts = document.createElement('time');
+    ts.className = 'chat-ts';
+    var d = new Date(msg.timestamp.includes('+') || msg.timestamp.includes('Z') ? msg.timestamp : msg.timestamp + 'Z');
+    ts.textContent = timeFmt.format(d);
+    ts.setAttribute('data-utc', msg.timestamp);
+    ts.setAttribute('data-fmt', 'time');
+
+    var user = document.createElement('span');
+    user.className = 'chat-user';
+    user.textContent = msg.username;
+
+    var text = document.createElement('span');
+    text.className = 'chat-text';
+    text.textContent = msg.text;
+
+    div.appendChild(ts);
+    div.appendChild(user);
+    div.appendChild(text);
+
+    // Remove empty state if present
+    var empty = panel.querySelector('p.text-sm');
+    if (empty) empty.remove();
+
+    panel.appendChild(div);
+  }
+
+  async function pollMessages() {
+    try {
+      var url = '/api/session/' + sessionId + '/messages';
+      if (lastTs) url += '?since=' + encodeURIComponent(lastTs);
+      var res = await fetch(url);
+      if (!res.ok) return;
+      var data = await res.json();
+
+      var panel = document.getElementById('chat-panel');
+
+      if (data.messages && data.messages.length > 0) {
+        var nearBottom = isNearBottom(panel);
+
+        for (var i = 0; i < data.messages.length; i++) {
+          appendMsg(data.messages[i]);
+          lastTs = data.messages[i].timestamp;
+          msgCount++;
+        }
+
+        var countEl = document.getElementById('chat-count');
+        if (countEl) countEl.textContent = '(' + msgCount + ' mensajes)';
+        if (nearBottom) scrollToBottom(panel);
+      }
+
+      // Update status line with latest join
+      var updateLine = document.getElementById('update-line');
+      if (data.last_join && updateLine) {
+        updateLine.textContent = '\uD83D\uDC4B ' + data.last_join.username + ' se unió';
+      }
+
+      var liveBadge = document.getElementById('chat-live-badge');
+      if (liveBadge) {
+        liveBadge.style.display = data.is_active ? '' : 'none';
+      }
+    } catch(e) {
+      // Silently ignore fetch errors
+    }
+  }
+
+  setInterval(pollMessages, 3000);
+
+  // Fetch immediately when tab regains focus (browsers throttle setInterval in background tabs)
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) pollMessages();
+  });
+})();
+</script>

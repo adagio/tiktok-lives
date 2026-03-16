@@ -1,5 +1,6 @@
 ---
 import type { ClipRow } from "@/lib/db";
+import LocalTime from "./LocalTime.astro";
 import PlayButton from "./PlayButton.astro";
 
 interface Props {
@@ -56,7 +57,7 @@ function truncate(text: string | null, max: number): string {
         <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150">
           <td class="py-2.5 px-3 text-text-muted tabular-nums">{clip.id}</td>
           <td class="py-2.5 px-3 font-medium text-text-primary">{clip.username}</td>
-          <td class="py-2.5 px-3 text-text-secondary">{clip.date ?? "—"}</td>
+          <td class="py-2.5 px-3 text-text-secondary"><LocalTime utc={clip.date} fmt="date" /></td>
           <td class="py-2.5 px-3">
             <span class="inline-block bg-brand-subtle text-brand rounded-md px-2 py-0.5 text-xs font-medium">
               {clip.query}
@@ -100,7 +101,7 @@ function truncate(text: string | null, max: number): string {
             <span class="text-xs text-text-muted">{clip.search_mode}</span>
           </div>
           <div class="flex items-center gap-3 mt-1.5 text-xs text-text-secondary">
-            <span>{clip.date ?? "—"}</span>
+            <LocalTime utc={clip.date} fmt="date" />
             <span class="font-mono text-accent-cyan">{formatScore(clip.score)}</span>
             <span class="tabular-nums">{formatTime(clip.start_seconds)}–{formatTime(clip.end_seconds)}</span>
             <span>{formatDuration(clip.start_seconds, clip.end_seconds)}</span>

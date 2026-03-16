@@ -2,6 +2,7 @@
 export const prerender = false;
 
 import Layout from "@/layouts/Layout.astro";
+import LocalTime from "@/components/LocalTime.astro";
 import TopicHeatmap from "@/components/TopicHeatmap.astro";
 import {
   getGlobalTopicScores,
@@ -125,8 +126,8 @@ function formatTime(seconds: number): string {
                           <span class="text-xs font-mono tabular-nums" style={`color: ${hex};`}>
                             {item.score.toFixed(3)}
                           </span>
-                          <span class="ml-auto text-xs text-text-muted">
-                            {item.username} · {item.date?.split("T")[0]}
+                          <span class="ml-auto text-xs text-text-muted inline-flex items-center gap-1">
+                            {item.username} · <LocalTime utc={item.date} fmt="date" />
                           </span>
                         </div>
                         <p class="text-xs text-text-secondary leading-relaxed line-clamp-2 group-hover:text-text-primary transition-colors">

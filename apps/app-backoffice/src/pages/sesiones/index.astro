@@ -2,6 +2,7 @@
 export const prerender = false;
 
 import Layout from "@/layouts/Layout.astro";
+import LocalTime from "@/components/LocalTime.astro";
 import { getSessions, getSessionAuthors } from "@/lib/db";
 import type { SessionRow } from "@/lib/db";
 
@@ -26,10 +27,6 @@ function formatDuration(seconds: number | null): string {
   const s = Math.floor(seconds % 60);
   if (h > 0) return s > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${h}h ${m}m` : `${h}h`;
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
-}
-
-function formatDate(dateStr: string): string {
-  return dateStr;
 }
 
 function formatIndexedAt(ts: string): string {
@@ -97,7 +94,7 @@ function formatIndexedAt(ts: string): string {
                 <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150 cursor-pointer" onclick={`window.location='/sesiones/${session.id}'`}>
                   <td class="py-2.5 px-3 text-text-muted tabular-nums">{session.id}</td>
                   <td class="py-2.5 px-3 font-medium text-text-primary">{session.username}</td>
-                  <td class="py-2.5 px-3 text-text-secondary">{formatDate(session.date)}</td>
+                  <td class="py-2.5 px-3 text-text-secondary"><LocalTime utc={session.date} fmt="date" /></td>
                   <td class="py-2.5 px-3 text-text-secondary tabular-nums">{formatDuration(session.duration_seconds)}</td>
                   <td class="py-2.5 px-3 text-text-secondary tabular-nums">{session.chunk_count}</td>
                   <td class="py-2.5 px-3 text-text-secondary tabular-nums">
@@ -130,7 +127,7 @@ function formatIndexedAt(ts: string): string {
                 <div class="min-w-0 flex-1">
                   <div class="flex items-center gap-2 flex-wrap">
                     <span class="font-medium text-text-primary text-sm">{session.username}</span>
-                    <span class="text-xs text-text-secondary">{formatDate(session.date)}</span>
+                    <LocalTime utc={session.date} fmt="date" class="text-xs text-text-secondary" />
                   </div>
                   <div class="flex items-center gap-3 mt-1.5 text-xs text-text-secondary">
                     <span class="tabular-nums">{formatDuration(session.duration_seconds)}</span>

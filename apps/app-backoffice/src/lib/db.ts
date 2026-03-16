@@ -221,6 +221,232 @@ export function getSessionClips(sessionId: number): ClipRow[] {
   }
 }
 
+// --- Battles ---
+
+export interface BattleRow {
+  id: number;
+  session_id: number;
+  battle_id: number;
+  opponent_username: string;
+  opponent_user_id: number;
+  host_score: number;
+  opponent_score: number;
+  detected_at: string;
+}
+
+export function getSessionBattles(sessionId: number): BattleRow[] {
+  const db = getDb();
+  try {
+    return db
+      .prepare(
+        "SELECT * FROM battles WHERE session_id = ? ORDER BY detected_at",
+      )
+      .all(sessionId) as BattleRow[];
+  } catch {
+    // battles table may not exist yet
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+// --- Guests (ventanilla / link mic) ---
+
+export interface GuestRow {
+  id: number;
+  session_id: number;
+  user_id: number;
+  username: string;
+  joined_at: string;
+  left_at: string | null;
+}
+
+export function getSessionGuests(sessionId: number): GuestRow[] {
+  const db = getDb();
+  try {
+    return db
+      .prepare(
+        "SELECT * FROM guests WHERE session_id = ? ORDER BY joined_at",
+      )
+      .all(sessionId) as GuestRow[];
+  } catch {
+    // guests table may not exist yet
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export function getLatestGuest(sessionId: number): { username: string; joined_at: string } | null {
+  const db = getDb();
+  try {
+    return (db
+      .prepare(
+        "SELECT username, joined_at FROM guests WHERE session_id = ? ORDER BY joined_at DESC LIMIT 1",
+      )
+      .get(sessionId) as { username: string; joined_at: string }) ?? null;
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+export function getLatestViewerJoin(sessionId: number, roomUsername?: string): { username: string; joined_at: string } | null {
+  const db = getDb();
+  try {
+    if (roomUsername) {
+      return (db
+        .prepare(
+          "SELECT username, joined_at FROM viewer_joins WHERE session_id = ? AND room_username = ? ORDER BY joined_at DESC LIMIT 1",
+        )
+        .get(sessionId, roomUsername) as { username: string; joined_at: string }) ?? null;
+    }
+    return (db
+      .prepare(
+        "SELECT username, joined_at FROM viewer_joins WHERE session_id = ? ORDER BY joined_at DESC LIMIT 1",
+      )
+      .get(sessionId) as { username: string; joined_at: string }) ?? null;
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+// --- Chat messages ---
+
+export interface ChatMessageRow {
+  id: number;
+  session_id: number;
+  battle_id: number | null;
+  room_username: string;
+  user_id: number;
+  username: string;
+  text: string;
+  timestamp: string;
+}
+
+export interface BattleDetail extends BattleRow {
+  host_username: string;
+}
+
+export function getBattle(id: number): BattleDetail | null {
+  const db = getDb();
+  try {
+    return (
+      (db
+        .prepare(
+          `SELECT b.*, s.username as host_username
+           FROM battles b
+           JOIN sessions s ON b.session_id = s.id
+           WHERE b.id = ?`,
+        )
+        .get(id) as BattleDetail) ?? null
+    );
+  } finally {
+    db.close();
+  }
+}
+
+export function getBattleChatMessages(
+  battleId: number,
+  since?: string,
+): ChatMessageRow[] {
+  const db = getDb();
+  try {
+    if (since) {
+      return db
+        .prepare(
+          `SELECT * FROM chat_messages
+           WHERE battle_id = ? AND timestamp > ?
+           ORDER BY timestamp`,
+        )
+        .all(battleId, since) as ChatMessageRow[];
+    }
+    return db
+      .prepare(
+        `SELECT * FROM chat_messages
+         WHERE battle_id = ?
+         ORDER BY timestamp`,
+      )
+      .all(battleId) as ChatMessageRow[];
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export function isBattleActive(battleId: number): boolean {
+  const db = getDb();
+  try {
+    const row = db
+      .prepare(
+        `SELECT MAX(timestamp) as last_ts FROM chat_messages WHERE battle_id = ?`,
+      )
+      .get(battleId) as { last_ts: string | null } | undefined;
+    if (!row?.last_ts) return false;
+    const tsStr = row.last_ts;
+    const lastTs = new Date(tsStr.includes("+") || tsStr.endsWith("Z") ? tsStr : tsStr + "Z").getTime();
+    const now = Date.now();
+    return now - lastTs < 30_000;
+  } catch {
+    return false;
+  } finally {
+    db.close();
+  }
+}
+
+export function getSessionChatMessages(
+  sessionId: number,
+  since?: string,
+): ChatMessageRow[] {
+  const db = getDb();
+  try {
+    if (since) {
+      return db
+        .prepare(
+          `SELECT * FROM chat_messages
+           WHERE session_id = ? AND timestamp > ?
+           ORDER BY timestamp`,
+        )
+        .all(sessionId, since) as ChatMessageRow[];
+    }
+    return db
+      .prepare(
+        `SELECT * FROM chat_messages
+         WHERE session_id = ?
+         ORDER BY timestamp`,
+      )
+      .all(sessionId) as ChatMessageRow[];
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export function isSessionActive(sessionId: number): boolean {
+  const db = getDb();
+  try {
+    const row = db
+      .prepare(
+        `SELECT MAX(timestamp) as last_ts FROM chat_messages WHERE session_id = ?`,
+      )
+      .get(sessionId) as { last_ts: string | null } | undefined;
+    if (!row?.last_ts) return false;
+    const tsStr = row.last_ts;
+    const lastTs = new Date(tsStr.includes("+") || tsStr.endsWith("Z") ? tsStr : tsStr + "Z").getTime();
+    const now = Date.now();
+    return now - lastTs < 30_000;
+  } catch {
+    return false;
+  } finally {
+    db.close();
+  }
+}
+
 // --- Topic scoring (pre-computed) ---
 
 export interface SessionTopicRow {

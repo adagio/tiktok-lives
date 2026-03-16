@@ -83,6 +83,26 @@ const { title } = Astro.props;
 
     <VideoOverlay />
 
+    <!-- UTC → local timezone conversion -->
+    <script is:inline>
+      (function() {
+        var fmts = {
+          date: { day: 'numeric', month: 'numeric', year: 'numeric' },
+          time: { hour: '2-digit', minute: '2-digit' },
+          datetime: { day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }
+        };
+        document.querySelectorAll('[data-utc]').forEach(function(el) {
+          var raw = el.getAttribute('data-utc');
+          if (!raw) return;
+          var d = new Date(raw.indexOf('Z') === -1 && raw.indexOf('+') === -1 ? raw + 'Z' : raw);
+          if (isNaN(d.getTime())) return;
+          var fmt = el.getAttribute('data-fmt') || 'datetime';
+          var opts = fmts[fmt] || fmts.datetime;
+          el.textContent = new Intl.DateTimeFormat(undefined, opts).format(d);
+        });
+      })();
+    </script>
+
     <!-- Sidebar menu logic -->
     <script>
       const toggle = document.getElementById('menu-toggle');

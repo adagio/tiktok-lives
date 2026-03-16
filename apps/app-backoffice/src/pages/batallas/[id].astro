@@ -1,0 +1,447 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import LocalTime from "@/components/LocalTime.astro";
+import {
+  getBattle,
+  getBattleChatMessages,
+  getLatestViewerJoin,
+  getSessionGuests,
+  isBattleActive,
+} from "@/lib/db";
+import type { BattleDetail, ChatMessageRow, GuestRow } from "@/lib/db";
+
+const id = Number(Astro.params.id);
+
+if (isNaN(id)) {
+  return Astro.redirect("/sesiones");
+}
+
+let battle: BattleDetail | null = null;
+let messages: ChatMessageRow[] = [];
+let guests: GuestRow[] = [];
+let isActive = false;
+let error: string | null = null;
+
+try {
+  battle = getBattle(id);
+  if (!battle) {
+    return Astro.redirect("/sesiones");
+  }
+  messages = getBattleChatMessages(battle.battle_id);
+  isActive = isBattleActive(battle.battle_id);
+  try {
+    guests = getSessionGuests(battle.session_id);
+  } catch {
+    // guests table may not exist
+  }
+} catch (e) {
+  error = e instanceof Error ? e.message : "Error al cargar la batalla";
+}
+
+const hostMessages = messages.filter((m) => m.room_username === battle?.host_username && m.text !== "__join__");
+const opponentMessages = messages.filter((m) => m.room_username === battle?.opponent_username && m.text !== "__join__");
+const latestJoin = battle ? getLatestViewerJoin(battle.session_id) : null;
+
+const won = battle && battle.host_score > battle.opponent_score;
+const lost = battle && battle.host_score < battle.opponent_score;
+const resultLabel = won ? "W" : lost ? "L" : "D";
+const resultColor = won
+  ? "text-emerald-400"
+  : lost
+    ? "text-rose-400"
+    : "text-amber-400";
+
+// Last timestamp for polling
+const lastTimestamp = messages.length > 0
+  ? messages[messages.length - 1].timestamp
+  : "";
+
+function formatGuestDuration(joinedAt: string, leftAt: string | null): string | null {
+  if (!leftAt) return null;
+  const ms = new Date(leftAt).getTime() - new Date(joinedAt).getTime();
+  if (isNaN(ms) || ms < 0) return null;
+  const totalSecs = Math.floor(ms / 1000);
+  const m = Math.floor(totalSecs / 60);
+  const s = totalSecs % 60;
+  if (m > 0) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  return `${s}s`;
+}
+---
+
+<Layout title={battle ? `⚔️ ${battle.host_username} vs ${battle.opponent_username}` : "Batalla"}>
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">Error</p>
+      <p class="text-error/70 text-sm">{error}</p>
+      <a href="/sesiones" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Volver</a>
+    </div>
+  ) : battle && (
+    <>
+      {/* Header */}
+      <div class="mb-6">
+        <a href={`/sesiones/${battle.session_id}`} class="text-sm text-text-muted hover:text-text-secondary transition-colors mb-3 inline-flex items-center gap-1">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true">
+            <path fill-rule="evenodd" d="M9.78 4.22a.75.75 0 010 1.06L7.06 8l2.72 2.72a.75.75 0 11-1.06 1.06L5.47 8.53a.75.75 0 010-1.06l3.25-3.25a.75.75 0 011.06 0z" clip-rule="evenodd" />
+          </svg>
+          Sesión de @{battle.host_username}
+        </a>
+
+        <div class="bg-card rounded-xl border border-border p-5">
+          <div class="flex flex-wrap items-center justify-between gap-4">
+            {/* Left: title + meta */}
+            <div>
+              <div class="flex items-center gap-3 mb-2">
+                <span class="text-lg">⚔️</span>
+                <h1 class="text-xl font-bold text-text-primary">
+                  @{battle.host_username}
+                  <span class="text-text-muted font-normal mx-2">vs</span>
+                  @{battle.opponent_username}
+                </h1>
+                {isActive && (
+                  <span id="live-badge" class="battle-live-badge">
+                    <span class="battle-live-dot" />
+                    EN VIVO
+                  </span>
+                )}
+              </div>
+              <div class="flex items-center gap-4 text-sm text-text-secondary">
+                <LocalTime utc={battle.detected_at} fmt="datetime" />
+                <span>{messages.length} mensajes</span>
+              </div>
+            </div>
+
+            {/* Right: score */}
+            <div class="flex items-center gap-4">
+              <div class="text-center">
+                <div class="text-xs text-text-muted uppercase tracking-wider mb-1">@{battle.host_username}</div>
+                <div id="host-score" class="text-3xl font-black tabular-nums text-text-primary">{battle.host_score}</div>
+              </div>
+              <div class="flex flex-col items-center gap-1">
+                <span class={`text-sm font-bold ${resultColor}`} id="result-label">{resultLabel}</span>
+                <span class="text-text-muted text-xs">—</span>
+              </div>
+              <div class="text-center">
+                <div class="text-xs text-text-muted uppercase tracking-wider mb-1">@{battle.opponent_username}</div>
+                <div id="opponent-score" class="text-3xl font-black tabular-nums text-text-primary">{battle.opponent_score}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Chat panels */}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+        {/* Host chat */}
+        <section class="bg-card rounded-xl border border-border flex flex-col" style="max-height: 60vh;">
+          <div class="p-4 border-b border-border flex items-center gap-2">
+            <span class="text-sm">💬</span>
+            <h2 class="text-sm font-semibold text-text-primary">Chat @{battle.host_username}</h2>
+            <span id="host-count" class="text-xs text-text-muted">({hostMessages.length})</span>
+          </div>
+          <div id="chat-host" class="flex-1 overflow-y-auto p-3 space-y-1 chat-panel" data-room={battle.host_username}>
+            {hostMessages.length > 0 ? hostMessages.map((msg) => (
+              <div class="chat-msg">
+                <time data-utc={msg.timestamp} data-fmt="time" class="chat-ts">{msg.timestamp.split("T")[1]?.slice(0, 5) ?? ""}</time>
+                <span class="chat-user">{msg.username}</span>
+                <span class="chat-text">{msg.text}</span>
+              </div>
+            )) : (
+              <p class="text-sm text-text-muted text-center py-8">Sin mensajes</p>
+            )}
+          </div>
+          <div id="update-line-host" class="update-line">
+            {latestJoin && (
+              <span>👋 {latestJoin.username} se unió</span>
+            )}
+          </div>
+        </section>
+
+        {/* Opponent chat */}
+        <section class="bg-card rounded-xl border border-border flex flex-col" style="max-height: 60vh;">
+          <div class="p-4 border-b border-border flex items-center gap-2">
+            <span class="text-sm">💬</span>
+            <h2 class="text-sm font-semibold text-text-primary">Chat @{battle.opponent_username}</h2>
+            <span id="opponent-count" class="text-xs text-text-muted">({opponentMessages.length})</span>
+          </div>
+          <div id="chat-opponent" class="flex-1 overflow-y-auto p-3 space-y-1 chat-panel" data-room={battle.opponent_username}>
+            {opponentMessages.length > 0 ? opponentMessages.map((msg) => (
+              <div class="chat-msg">
+                <time data-utc={msg.timestamp} data-fmt="time" class="chat-ts">{msg.timestamp.split("T")[1]?.slice(0, 5) ?? ""}</time>
+                <span class="chat-user">{msg.username}</span>
+                <span class="chat-text">{msg.text}</span>
+              </div>
+            )) : (
+              <p class="text-sm text-text-muted text-center py-8">Sin mensajes</p>
+            )}
+          </div>
+          <div id="update-line-opponent" class="update-line"></div>
+        </section>
+      </div>
+
+      {/* Guests */}
+      {guests.length > 0 && (
+        <section class="bg-card rounded-xl border border-border p-5">
+          <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4 flex items-center gap-2">
+            <span class="text-lg">🎙️</span> Ventanilla
+            <span class="text-text-muted font-normal normal-case text-xs">({guests.length})</span>
+          </h2>
+          <div class="flex flex-wrap gap-3">
+            {guests.map((g) => {
+              const duration = formatGuestDuration(g.joined_at, g.left_at);
+              return (
+                <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-raised/50 border border-border/50 text-sm">
+                  <span class="font-medium text-text-primary">@{g.username}</span>
+                  {duration && <span class="text-xs text-text-muted font-mono tabular-nums">{duration}</span>}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Hidden data for polling script */}
+      <div id="battle-data" class="hidden"
+        data-battle-db-id={id}
+        data-battle-id={battle.battle_id}
+        data-host={battle.host_username}
+        data-opponent={battle.opponent_username}
+        data-active={isActive ? "true" : "false"}
+        data-last-ts={lastTimestamp}
+      />
+    </>
+  )}
+</Layout>
+
+<style>
+  .battle-live-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 9999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.12);
+    border: 1px solid rgba(248, 113, 113, 0.25);
+  }
+
+  .battle-live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #f87171;
+    animation: pulse-dot 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .chat-panel {
+    min-height: 200px;
+  }
+
+  .update-line {
+    padding: 6px 12px;
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    border-top: 1px solid var(--color-border);
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+  }
+
+  .update-line:empty {
+    display: none;
+  }
+</style>
+
+<style is:global>
+  .chat-panel .chat-msg {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+  }
+
+  .chat-panel .chat-msg:hover {
+    background: var(--color-card-hover);
+  }
+
+  .chat-panel .chat-ts {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-muted);
+    opacity: 0.6;
+  }
+
+  .chat-panel .chat-user {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--color-accent-cyan);
+    font-size: 0.75rem;
+  }
+
+  .chat-panel .chat-text {
+    color: var(--color-text-secondary);
+    word-break: break-word;
+  }
+
+  .chat-panel .chat-msg-new {
+    animation: msg-fade-in 0.3s ease-out;
+  }
+
+  @keyframes msg-fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+
+<script is:inline>
+(function() {
+  var el = document.getElementById('battle-data');
+  if (!el || el.dataset.active !== 'true') return;
+
+  var battleDbId = el.dataset.battleDbId;
+  var host = el.dataset.host;
+  var opponent = el.dataset.opponent;
+  var lastTs = el.dataset.lastTs || '';
+  // Track message counts
+  var hCount = document.querySelectorAll('#chat-host .chat-msg').length;
+  var oCount = document.querySelectorAll('#chat-opponent .chat-msg').length;
+
+  // Auto-scroll: only if user is near bottom
+  function isNearBottom(panel) {
+    if (!panel) return true;
+    return panel.scrollHeight - panel.scrollTop - panel.clientHeight < 60;
+  }
+
+  function scrollToBottom(panel) {
+    if (panel) panel.scrollTop = panel.scrollHeight;
+  }
+
+  // Scroll panels to bottom on load
+  scrollToBottom(document.getElementById('chat-host'));
+  scrollToBottom(document.getElementById('chat-opponent'));
+
+  // Time formatter for new messages
+  var timeFmt = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+
+  function appendMsg(panel, msg) {
+    if (!panel) return;
+    if (msg.text === '__join__') return; // legacy rows — skip
+
+    var div = document.createElement('div');
+    div.className = 'chat-msg chat-msg-new';
+
+    var ts = document.createElement('time');
+    ts.className = 'chat-ts';
+    var d = new Date(msg.timestamp.includes('+') || msg.timestamp.includes('Z') ? msg.timestamp : msg.timestamp + 'Z');
+    ts.textContent = timeFmt.format(d);
+    ts.setAttribute('data-utc', msg.timestamp);
+    ts.setAttribute('data-fmt', 'time');
+
+    var user = document.createElement('span');
+    user.className = 'chat-user';
+    user.textContent = msg.username;
+
+    var text = document.createElement('span');
+    text.className = 'chat-text';
+    text.textContent = msg.text;
+
+    div.appendChild(ts);
+    div.appendChild(user);
+    div.appendChild(text);
+
+    // Remove empty state if present
+    var empty = panel.querySelector('p.text-sm');
+    if (empty) empty.remove();
+
+    panel.appendChild(div);
+  }
+
+  async function pollMessages() {
+    try {
+      var url = '/api/battle/' + battleDbId + '/messages';
+      if (lastTs) url += '?since=' + encodeURIComponent(lastTs);
+      var res = await fetch(url);
+      if (!res.ok) return;
+      var data = await res.json();
+
+      // Fresh DOM lookups each poll
+      var hostPanel = document.getElementById('chat-host');
+      var oppPanel = document.getElementById('chat-opponent');
+
+      // Update scores
+      if (data.battle) {
+        var hostScore = document.getElementById('host-score');
+        var oppScore = document.getElementById('opponent-score');
+        if (hostScore) hostScore.textContent = data.battle.host_score;
+        if (oppScore) oppScore.textContent = data.battle.opponent_score;
+        // Update result label
+        var resultLabel = document.getElementById('result-label');
+        if (resultLabel) {
+          var hs = data.battle.host_score, os = data.battle.opponent_score;
+          resultLabel.textContent = hs > os ? 'W' : hs < os ? 'L' : 'D';
+          resultLabel.className = 'text-sm font-bold ' + (hs > os ? 'text-emerald-400' : hs < os ? 'text-rose-400' : 'text-amber-400');
+        }
+      }
+
+      // Append new messages
+      if (data.messages && data.messages.length > 0) {
+        var hostNear = isNearBottom(hostPanel);
+        var oppNear = isNearBottom(oppPanel);
+
+        for (var i = 0; i < data.messages.length; i++) {
+          var msg = data.messages[i];
+          if (msg.room_username === host) {
+            appendMsg(hostPanel, msg);
+            hCount++;
+          } else if (msg.room_username === opponent) {
+            appendMsg(oppPanel, msg);
+            oCount++;
+          }
+          lastTs = msg.timestamp;
+        }
+
+        var hostCount = document.getElementById('host-count');
+        var oppCount = document.getElementById('opponent-count');
+        if (hostCount) hostCount.textContent = '(' + hCount + ')';
+        if (oppCount) oppCount.textContent = '(' + oCount + ')';
+        if (hostNear) scrollToBottom(hostPanel);
+        if (oppNear) scrollToBottom(oppPanel);
+      }
+
+      // Update status line with latest join (host room only)
+      var updateLineHost = document.getElementById('update-line-host');
+      if (data.last_join && updateLineHost) {
+        updateLineHost.textContent = '\uD83D\uDC4B ' + data.last_join.username + ' se unió';
+      }
+
+      var liveBadge = document.getElementById('live-badge');
+      if (liveBadge) {
+        liveBadge.style.display = (data.battle && data.battle.is_active) ? '' : 'none';
+      }
+    } catch(e) {
+      // Silently ignore fetch errors
+    }
+  }
+
+  setInterval(pollMessages, 3000);
+
+  // Fetch immediately when tab regains focus (browsers throttle setInterval in background tabs)
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) pollMessages();
+  });
+})();
+</script>

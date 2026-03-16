@@ -1,0 +1,24 @@
+---
+interface Props {
+  utc: string | null | undefined;
+  fmt?: "date" | "time" | "datetime";
+  class?: string;
+}
+
+const { utc, fmt = "datetime", class: className } = Astro.props;
+
+// Build a legible UTC fallback
+let fallback = "—";
+if (utc) {
+  const [datePart, timePart] = utc.split("T");
+  if (fmt === "date") fallback = datePart ?? utc;
+  else if (fmt === "time") fallback = timePart?.slice(0, 5) ?? utc;
+  else fallback = timePart ? `${datePart} ${timePart.slice(0, 5)}` : datePart ?? utc;
+}
+---
+
+{utc ? (
+  <time data-utc={utc} data-fmt={fmt} class={className}>{fallback}</time>
+) : (
+  <span class={className}>—</span>
+)}
