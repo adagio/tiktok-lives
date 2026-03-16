@@ -268,6 +268,25 @@ def session_exists(conn: sqlite3.Connection, username: str, date: str, srt_path:
     return row is not None
 
 
+def find_monitor_session(conn: sqlite3.Connection, username: str, date: str) -> int | None:
+    """Find a session created by monitor (srt_path IS NULL) for the same username and date prefix."""
+    row = conn.execute(
+        "SELECT id FROM sessions WHERE username=? AND date LIKE ? AND srt_path IS NULL ORDER BY date DESC LIMIT 1",
+        (username, date[:10] + "%"),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def update_session(conn: sqlite3.Connection, session_id: int,
+                   session_dir: Path, srt_name: str, duration: float) -> None:
+    """Update a monitor-created session with SRT info."""
+    conn.execute(
+        "UPDATE sessions SET ts_path=?, srt_path=?, duration_seconds=? WHERE id=?",
+        (str(session_dir), srt_name, duration, session_id),
+    )
+    conn.commit()
+
+
 def insert_session(conn: sqlite3.Connection, username: str, date: str,
                    session_dir: Path, srt_name: str, duration: float) -> int:
     cur = conn.execute(
@@ -410,8 +429,15 @@ def main():
         audio_count = sum(1 for c in chunks if c.get("embedding_audio_blob"))
         print(f"  {audio_count}/{len(chunks)} audio embeddings in {time.time() - t0:.1f}s", flush=True)
 
-    # Store
-    session_id = insert_session(conn, username, date, session_dir, args.srt, duration)
+    # Store — check if monitor already created a session for this date
+    monitor_sid = find_monitor_session(conn, username, date)
+    if monitor_sid is not None:
+        session_id = monitor_sid
+        update_session(conn, session_id, session_dir, args.srt, duration)
+        print(f"Updated existing session {session_id} (created by monitor)", flush=True)
+    else:
+        session_id = insert_session(conn, username, date, session_dir, args.srt, duration)
+
     insert_chunks(conn, session_id, chunks)
     conn.close()
 
