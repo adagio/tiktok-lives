@@ -3,5 +3,12 @@ name = "recorder"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx<0.28",
+    "psutil",
+    "pyee<12",
+    "tiktoklive>=6.1.4",
     "yt-dlp",
 ]
+
+[tool.uv]
+prerelease = "allow"
