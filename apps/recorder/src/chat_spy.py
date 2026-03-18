@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from TikTokLive import TikTokLiveClient
@@ -42,6 +43,7 @@ class ChatSpy:
         self._buffer: list[dict] = []
         self._join_buffer: list[dict] = []
         self._flush_task: asyncio.Task | None = None
+        self._last_event_at: float = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -82,6 +84,7 @@ class ChatSpy:
 
         @self.client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent) -> None:
+            self._last_event_at = time.monotonic()
             log.info("💬 ChatSpy connected to @%s (room=%s)", self.username, self.client.room_id)
 
         @self.client.on(DisconnectEvent)
@@ -91,6 +94,7 @@ class ChatSpy:
 
         @self.client.on(CommentEvent)
         async def on_comment(event: CommentEvent) -> None:
+            self._last_event_at = time.monotonic()
             try:
                 user = event.user
                 msg = {
@@ -110,6 +114,7 @@ class ChatSpy:
 
         @self.client.on(JoinEvent)
         async def on_join(event: JoinEvent) -> None:
+            self._last_event_at = time.monotonic()
             try:
                 user = event.user
                 self._join_buffer.append({
@@ -127,9 +132,12 @@ class ChatSpy:
         self._flush_task = asyncio.create_task(self._periodic_flush())
 
         try:
-            await self.client.connect()
+            await asyncio.wait_for(self.client.connect(), timeout=30)
             while self._running:
                 await asyncio.sleep(5)
+                if self._last_event_at and (time.monotonic() - self._last_event_at) > 300:
+                    log.warning("💬 ChatSpy for @%s: no events in 300s, assuming dead connection", self.username)
+                    self._running = False
         except Exception as e:
             log.warning("ChatSpy for @%s ended: %s", self.username, e)
         finally:

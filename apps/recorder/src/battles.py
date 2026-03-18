@@ -80,7 +80,7 @@ def get_battle_info(room_id: str) -> dict | None:
 
 def get_session_id(db_path: str, username: str) -> int | None:
     """Find the latest session_id for a username in clips.db."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         row = conn.execute(
             "SELECT id FROM sessions WHERE username = ? ORDER BY date DESC LIMIT 1",
@@ -101,7 +101,7 @@ def _ensure_pid_column(conn: sqlite3.Connection) -> None:
 
 def create_session(db_path: str, username: str, date_iso: str, ts_path: str, pid: int | None = None) -> int:
     """Insert a session row when recording starts, return session_id."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         _ensure_pid_column(conn)
         cur = conn.execute(
@@ -116,7 +116,7 @@ def create_session(db_path: str, username: str, date_iso: str, ts_path: str, pid
 
 def update_session_duration(db_path: str, session_id: int, duration_seconds: float) -> None:
     """Update duration_seconds when recording ends."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.execute(
             "UPDATE sessions SET duration_seconds = ? WHERE id = ?",
@@ -137,7 +137,7 @@ def save_battle(
     opponent_score: int = 0,
 ) -> None:
     """Insert a new battle row (or ignore if already exists)."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.execute(
             """INSERT OR IGNORE INTO battles
@@ -167,7 +167,7 @@ def update_battle_scores(
     opponent_score: int,
 ) -> None:
     """Update scores for an existing battle row."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.execute(
             """UPDATE battles SET host_score = ?, opponent_score = ?
@@ -222,15 +222,24 @@ def get_linked_users(room_id: str) -> list[dict]:
     return result
 
 
-def save_guest(db_path: str, session_id: int, user_id: int, username: str, joined_at: str) -> None:
+def _ensure_nickname_column(conn: sqlite3.Connection) -> None:
+    """Add nickname column to guests table if it doesn't exist."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(guests)")}
+    if "nickname" not in cols:
+        conn.execute("ALTER TABLE guests ADD COLUMN nickname TEXT")
+        conn.commit()
+
+
+def save_guest(db_path: str, session_id: int, user_id: int, username: str, joined_at: str, nickname: str | None = None) -> None:
     """Insert a new guest row (or ignore if already exists)."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
+        _ensure_nickname_column(conn)
         conn.execute(
             """INSERT OR IGNORE INTO guests
-               (session_id, user_id, username, joined_at)
-               VALUES (?, ?, ?, ?)""",
-            (session_id, user_id, username, joined_at),
+               (session_id, user_id, username, nickname, joined_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (session_id, user_id, username, nickname, joined_at),
         )
         conn.commit()
     finally:
@@ -239,7 +248,7 @@ def save_guest(db_path: str, session_id: int, user_id: int, username: str, joine
 
 def update_guest_left(db_path: str, session_id: int, user_id: int, left_at: str) -> None:
     """Update left_at for the most recent guest entry without left_at."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.execute(
             """UPDATE guests SET left_at = ?
@@ -251,11 +260,26 @@ def update_guest_left(db_path: str, session_id: int, user_id: int, left_at: str)
         conn.close()
 
 
+def close_orphaned_guests(db_path: str) -> int:
+    """Close all guests with left_at IS NULL (orphaned by crash/restart)."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cur = conn.execute(
+            "UPDATE guests SET left_at = ? WHERE left_at IS NULL",
+            (now_iso,),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def save_viewer_joins(db_path: str, joins: list[dict]) -> None:
     """Insert a batch of viewer join events."""
     if not joins:
         return
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         # Inline migration
         conn.execute(
@@ -283,7 +307,7 @@ def save_chat_messages(db_path: str, messages: list[dict]) -> None:
     """Insert a batch of chat messages."""
     if not messages:
         return
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.executemany(
             """INSERT INTO chat_messages
@@ -312,7 +336,7 @@ def close_orphaned_sessions(db_path: str) -> tuple[list[dict], list[dict]]:
     - closed: sessions whose ffmpeg died — duration computed and saved
     - alive: sessions whose ffmpeg PID is still running — candidates for re-attach
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
         _ensure_pid_column(conn)
         orphans = conn.execute(
@@ -368,9 +392,12 @@ def close_orphaned_sessions(db_path: str) -> tuple[list[dict], list[dict]]:
         conn.close()
 
 
-def resolve_user_id(user_id: int) -> str:
-    """Resolve a TikTok numeric user ID to @username via share redirect."""
+def resolve_user_id(user_id: int) -> tuple[str, str | None]:
+    """Resolve a TikTok numeric user ID to (@username, nickname) via share redirect."""
     with httpx.Client(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
         resp = client.get(f"https://www.tiktok.com/share/user/{user_id}")
-        match = re.search(r"tiktok\.com/@([^/?]+)", str(resp.url))
-        return match.group(1) if match else f"id:{user_id}"
+        url_match = re.search(r"tiktok\.com/@([^/?]+)", str(resp.url))
+        username = url_match.group(1) if url_match else f"id:{user_id}"
+        nick_match = re.search(r'"nickname":"([^"]+)"', resp.text)
+        nickname = nick_match.group(1) if nick_match else None
+        return (username, nickname)

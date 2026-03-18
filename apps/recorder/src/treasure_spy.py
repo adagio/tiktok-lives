@@ -95,7 +95,7 @@ class TreasureSpy:
                 pass
 
         try:
-            await self.client.connect()
+            await asyncio.wait_for(self.client.connect(), timeout=30)
             while self._running:
                 await asyncio.sleep(5)
         except Exception as e:

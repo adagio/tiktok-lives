@@ -46,7 +46,7 @@ def check_is_live(username: str) -> dict | None:
     Other exceptions propagate.
     """
     tiktok_url = f"https://www.tiktok.com/@{username}/live"
-    ydl_opts = {"quiet": True, "no_warnings": True}
+    ydl_opts = {"quiet": True, "no_warnings": True, "socket_timeout": 20}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(tiktok_url, download=False)

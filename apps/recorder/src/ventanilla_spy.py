@@ -35,18 +35,18 @@ class VentanillaSpy:
         self.client: TikTokLiveClient | None = None
         self.current_guests: set[int] = set()
         self._running = False
-        self._resolved: dict[int, str] = {}  # local cache
+        self._resolved: dict[int, tuple[str, str | None]] = {}  # local cache: uid → (username, nickname)
 
     @property
     def is_running(self) -> bool:
         return self._running
 
-    def _resolve(self, user_id: int) -> str:
+    def _resolve(self, user_id: int) -> tuple[str, str | None]:
         if user_id not in self._resolved:
             try:
                 self._resolved[user_id] = resolve_user_id(user_id)
             except Exception:
-                self._resolved[user_id] = f"id:{user_id}"
+                self._resolved[user_id] = (f"id:{user_id}", None)
         return self._resolved[user_id]
 
     async def start(self):
@@ -72,7 +72,7 @@ class VentanillaSpy:
             await self._handle_fanticket(event)
 
         try:
-            await self.client.connect()
+            await asyncio.wait_for(self.client.connect(), timeout=30)
             while self._running:
                 await asyncio.sleep(5)
         except Exception as e:
@@ -103,16 +103,17 @@ class VentanillaSpy:
 
         # New guests
         for uid in guest_uids - self.current_guests:
-            uname = await asyncio.to_thread(self._resolve, uid)
+            uname, nickname = await asyncio.to_thread(self._resolve, uid)
             log.info("🎙️  @%s joined ventanilla of @%s", uname, self.username)
             try:
-                save_guest(self.db_path, self.session_id, uid, uname, now_iso)
+                save_guest(self.db_path, self.session_id, uid, uname, now_iso, nickname=nickname)
             except Exception:
                 log.warning("Failed to save guest @%s", uname, exc_info=True)
 
         # Departed guests
         for uid in self.current_guests - guest_uids:
-            uname = self._resolved.get(uid, str(uid))
+            resolved = self._resolved.get(uid)
+            uname = resolved[0] if resolved else str(uid)
             log.info("🎙️  user %s left ventanilla of @%s", uname, self.username)
             try:
                 update_guest_left(self.db_path, self.session_id, uid, now_iso)

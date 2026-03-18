@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 import json
 import logging
@@ -16,6 +19,7 @@ from pathlib import Path
 from subprocess import Popen
 
 from battles import (
+    close_orphaned_guests,
     close_orphaned_sessions,
     create_session,
     get_battle_info,
@@ -27,12 +31,15 @@ from battles import (
     update_session_duration,
 )
 from chat_spy import ChatSpy
+from profile_checker import check_and_save as check_profile
 from recording import AdoptedProcess, check_is_live, start_recording
 from treasure_spy import TreasureSpy
 from ventanilla_spy import VentanillaSpy
 
 WATCHLIST_PATH = Path(__file__).resolve().parent.parent / "watchlist.json"
 LOG_PATH = Path(__file__).resolve().parent.parent / "monitor.log"
+HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / "monitor.heartbeat"
+LOCK_PATH = Path(__file__).resolve().parent.parent / "monitor.lock"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DB_PATH = str(REPO_ROOT / "clips.db")
 
@@ -83,10 +90,25 @@ class Monitor:
         self.resolved_users: dict[int, str] = {}
         self._shutdown = False
 
+    async def _heartbeat_loop(self):
+        """Write timestamp to heartbeat file every 30s for watchdog hang detection."""
+        while not self._shutdown:
+            try:
+                HEARTBEAT_PATH.write_text(str(time.time()), encoding="utf-8")
+                active_users = list(self.active.keys())
+                if active_users:
+                    log.info("♥ heartbeat — %d active: %s", len(active_users), ", ".join(active_users))
+                else:
+                    log.info("♥ heartbeat — idle")
+            except Exception:
+                log.debug("Heartbeat write failed", exc_info=True)
+            await asyncio.sleep(30)
+
     def _resolve(self, user_id: int) -> str:
         if user_id not in self.resolved_users:
             try:
-                self.resolved_users[user_id] = resolve_user_id(user_id)
+                username, _ = resolve_user_id(user_id)
+                self.resolved_users[user_id] = username
             except Exception:
                 self.resolved_users[user_id] = f"id:{user_id}"
         return self.resolved_users[user_id]
@@ -159,7 +181,11 @@ class Monitor:
         """Launch VentanillaSpy for a session (if possible)."""
         if sess.session_id is None:
             return
-        host_uid = await asyncio.to_thread(get_host_user_id, sess.username)
+        try:
+            host_uid = await asyncio.wait_for(asyncio.to_thread(get_host_user_id, sess.username), timeout=20)
+        except asyncio.TimeoutError:
+            log.warning("Timeout: get_host_user_id for @%s", sess.username)
+            host_uid = None
         if not host_uid:
             log.debug("Could not get host user_id for @%s, skipping spy", sess.username)
             return
@@ -380,10 +406,33 @@ class Monitor:
         self.active.clear()
         log.info("Monitor stopped.")
 
+    async def _profile_check_loop(self):
+        """Periodically check all watchlist users for new video uploads."""
+        PROFILE_CHECK_INTERVAL = 300  # 5 minutes
+        while not self._shutdown:
+            _, users = self._load_watchlist()
+            for user in users:
+                if self._shutdown:
+                    break
+                username = user["username"]
+                try:
+                    new_count = await asyncio.wait_for(asyncio.to_thread(check_profile, DB_PATH, username), timeout=30)
+                    if new_count > 0:
+                        log.info("📹 @%s uploaded %d new video(s)", username, new_count)
+                except asyncio.TimeoutError:
+                    log.warning("Timeout: check_profile for @%s", username)
+                except Exception:
+                    log.debug("Profile check failed for @%s", username, exc_info=True)
+                await asyncio.sleep(2)  # small delay between profile fetches
+            await asyncio.sleep(PROFILE_CHECK_INTERVAL)
+
     async def run(self):
         # Close orphaned sessions / re-attach alive ffmpeg from previous runs
         try:
             closed, alive = close_orphaned_sessions(DB_PATH)
+            orphaned_guests = close_orphaned_guests(DB_PATH)
+            if orphaned_guests:
+                log.info("Closed %d orphaned guest(s) from previous run", orphaned_guests)
             for s in closed:
                 log.info("Closed orphaned session %d (@%s, %.0fs)", s["id"], s["username"], s["duration"])
             for s in alive:
@@ -404,6 +453,10 @@ class Monitor:
 
         log.info("Monitor started. Watchlist: %s", WATCHLIST_PATH)
 
+        # Launch background tasks
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        profile_task = asyncio.create_task(self._profile_check_loop())
+
         while not self._shutdown:
             interval, users = self._load_watchlist()
 
@@ -423,7 +476,11 @@ class Monitor:
                 username = user["username"]
 
                 if username in self.active:
-                    battle_result = await asyncio.to_thread(self._check_battle_sync, username)
+                    try:
+                        battle_result = await asyncio.wait_for(asyncio.to_thread(self._check_battle_sync, username), timeout=30)
+                    except asyncio.TimeoutError:
+                        log.warning("Timeout: _check_battle_sync for @%s", username)
+                        battle_result = None
                     sess = self.active[username]
                     if battle_result == "__ended__":
                         await self._stop_treasure_spy(sess)
@@ -442,14 +499,21 @@ class Monitor:
 
                 log.info("Checking @%s ...", username)
                 try:
-                    result = await asyncio.to_thread(check_is_live, username)
+                    result = await asyncio.wait_for(asyncio.to_thread(check_is_live, username), timeout=45)
+                except asyncio.TimeoutError:
+                    log.warning("Timeout: check_is_live for @%s", username)
+                    result = None
                 except Exception:
                     log.warning("Error checking @%s", username, exc_info=True)
                     result = None
 
                 if result is not None:
                     sess = self._start_session(username, result)
-                    battle_result = await asyncio.to_thread(self._check_battle_sync, username)
+                    try:
+                        battle_result = await asyncio.wait_for(asyncio.to_thread(self._check_battle_sync, username), timeout=30)
+                    except asyncio.TimeoutError:
+                        log.warning("Timeout: _check_battle_sync for @%s (new session)", username)
+                        battle_result = None
                     if battle_result and battle_result != "__ended__":
                         await self._launch_treasure_spy(sess, battle_result)
                     await self._launch_spy(sess)
@@ -464,11 +528,35 @@ class Monitor:
             if not self._shutdown:
                 await asyncio.sleep(delay_between)
 
+        heartbeat_task.cancel()
+        profile_task.cancel()
+        try:
+            await asyncio.gather(heartbeat_task, profile_task, return_exceptions=True)
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        # Clean up heartbeat file
+        try:
+            HEARTBEAT_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
+
         await self._shutdown_all()
 
 
 def main():
+    import msvcrt
+
     from TikTokLive.client.web.web_settings import WebDefaults
+
+    # Acquire exclusive lock to prevent duplicate instances
+    lock_file = open(LOCK_PATH, "w")
+    try:
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except (OSError, IOError):
+        log.error("Another monitor instance is already running (lock: %s)", LOCK_PATH)
+        lock_file.close()
+        sys.exit(1)
 
     api_key = os.environ.get("SIGN_API_KEY")
     if api_key:
@@ -486,7 +574,14 @@ def main():
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    asyncio.run(monitor.run())
+    try:
+        asyncio.run(monitor.run())
+    finally:
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+        lock_file.close()
 
 
 if __name__ == "__main__":
