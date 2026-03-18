@@ -6,6 +6,7 @@ dependencies = [
     "httpx<0.28",
     "psutil",
     "pyee<12",
+    "python-dotenv>=1.2.2",
     "tiktoklive>=6.1.4",
     "yt-dlp",
 ]

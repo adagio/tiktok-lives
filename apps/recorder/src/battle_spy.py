@@ -32,7 +32,7 @@ def main():
 
     handles = {}
     for uid in user_ids:
-        handles[uid] = resolve_user_id(uid)
+        handles[uid], _ = resolve_user_id(uid)
 
     # Print results
     battle_id = info.get("battle_id")

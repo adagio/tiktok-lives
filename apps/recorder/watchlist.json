@@ -1,0 +1,8 @@
+{
+  "poll_interval_seconds": 30,
+  "users": [
+    {"username": "alejandra_blankita", "enabled": true},
+    {"username": "kelyalvarezh", "enabled": true},
+    {"username": "xanaave", "enabled": true}
+  ]
+}

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS guests (
   session_id INTEGER REFERENCES sessions(id),
   user_id INTEGER NOT NULL,
   username TEXT NOT NULL,
+  nickname TEXT,
   joined_at TEXT NOT NULL,
   left_at TEXT,
   UNIQUE(session_id, user_id, joined_at)
