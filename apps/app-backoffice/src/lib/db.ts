@@ -257,6 +257,7 @@ export interface GuestRow {
   session_id: number;
   user_id: number;
   username: string;
+  nickname: string | null;
   joined_at: string;
   left_at: string | null;
 }
@@ -277,14 +278,40 @@ export function getSessionGuests(sessionId: number): GuestRow[] {
   }
 }
 
-export function getLatestGuest(sessionId: number): { username: string; joined_at: string } | null {
+export function getActiveGuests(sessionId: number): { username: string; nickname: string | null; joined_at: string }[] {
+  const db = getDb();
+  try {
+    // Staleness safety net: ignore guests joined >4h ago unless there's recent chat (30min).
+    // Protects against orphaned guests from monitor crashes.
+    return db
+      .prepare(
+        `SELECT username, nickname, joined_at FROM guests
+         WHERE session_id = ? AND left_at IS NULL
+           AND (
+             joined_at > datetime('now', '-4 hours')
+             OR EXISTS (
+               SELECT 1 FROM chat_messages
+               WHERE session_id = ? AND timestamp > datetime('now', '-30 minutes')
+             )
+           )
+         ORDER BY joined_at`,
+      )
+      .all(sessionId, sessionId) as { username: string; nickname: string | null; joined_at: string }[];
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export function getLatestGuest(sessionId: number): { username: string; nickname: string | null; joined_at: string } | null {
   const db = getDb();
   try {
     return (db
       .prepare(
-        "SELECT username, joined_at FROM guests WHERE session_id = ? ORDER BY joined_at DESC LIMIT 1",
+        "SELECT username, nickname, joined_at FROM guests WHERE session_id = ? ORDER BY joined_at DESC LIMIT 1",
       )
-      .get(sessionId) as { username: string; joined_at: string }) ?? null;
+      .get(sessionId) as { username: string; nickname: string | null; joined_at: string }) ?? null;
   } catch {
     return null;
   } finally {
@@ -516,6 +543,68 @@ export function getHeatmapData(): HeatmapRow[] {
          ORDER BY s.date ASC, st.topic`,
       )
       .all() as HeatmapRow[];
+  } finally {
+    db.close();
+  }
+}
+
+/** Get latest session for a given username */
+export function getLatestSessionByUsername(username: string): SessionRow | null {
+  const db = getDb();
+  try {
+    const sql = `
+      SELECT s.id, s.username, s.date, s.duration_seconds, s.indexed_at,
+        (SELECT COUNT(*) FROM chunks ch WHERE ch.session_id = s.id) as chunk_count,
+        (SELECT COUNT(*) FROM clips c WHERE c.session_id = s.id) as clip_count
+      FROM sessions s
+      WHERE s.username = ?
+      ORDER BY s.date DESC
+      LIMIT 1
+    `;
+    return (db.prepare(sql).get(username) as SessionRow) ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Get count of chat messages for a session */
+export function getChatMessageCount(sessionId: number): number {
+  const db = getDb();
+  try {
+    const row = db
+      .prepare("SELECT COUNT(*) as c FROM chat_messages WHERE session_id = ?")
+      .get(sessionId) as { c: number };
+    return row.c;
+  } catch {
+    return 0;
+  } finally {
+    db.close();
+  }
+}
+
+/** Get latest video uploaded by a username */
+export interface UserVideoRow {
+  id: number;
+  username: string;
+  video_id: string;
+  description: string | null;
+  create_time: string;
+  detected_at: string;
+}
+
+export function getLatestVideo(username: string): UserVideoRow | null {
+  const db = getDb();
+  try {
+    return (
+      (db
+        .prepare(
+          "SELECT * FROM user_videos WHERE username = ? ORDER BY create_time DESC LIMIT 1",
+        )
+        .get(username) as UserVideoRow) ?? null
+    );
+  } catch {
+    // table may not exist yet
+    return null;
   } finally {
     db.close();
   }

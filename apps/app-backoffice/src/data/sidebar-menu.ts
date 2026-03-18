@@ -1,7 +1,7 @@
 export interface MenuItem {
   label: string;
   href: string;
-  icon: "home" | "clips" | "video" | "topics";
+  icon: "home" | "clips" | "video" | "topics" | "eye";
 }
 
 export const menuItems: MenuItem[] = [
@@ -9,4 +9,5 @@ export const menuItems: MenuItem[] = [
   { label: "Sesiones", href: "/sesiones", icon: "video" },
   { label: "Clips", href: "/clips", icon: "clips" },
   { label: "Topics", href: "/topics", icon: "topics" },
+  { label: "Vigilados", href: "/vigilados", icon: "eye" },
 ];
