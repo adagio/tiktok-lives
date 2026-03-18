@@ -24,3 +24,8 @@ __pycache__/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Runtime files
+*.log
+monitor.heartbeat
+monitor.lock
