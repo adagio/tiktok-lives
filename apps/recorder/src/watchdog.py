@@ -1,12 +1,15 @@
 """Watchdog — restarts monitor.py if it crashes or hangs, with exponential backoff."""
 
 import logging
+import os
 import signal
 import subprocess
 import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+from lockfile import acquire_lock, release_lock
 
 MONITOR_SCRIPT = Path(__file__).resolve().parent / "monitor.py"
 HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / "monitor.heartbeat"
@@ -43,24 +46,36 @@ def _heartbeat_age() -> float | None:
         return None
 
 
-def _acquire_lock():
-    """Acquire exclusive lockfile. Returns file handle or None if already locked."""
-    import msvcrt
-
-    fh = open(LOCK_PATH, "w")
+def _kill_orphan_monitors():
+    """Kill any orphaned monitor.py processes from previous runs."""
     try:
-        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-        return fh
-    except (OSError, IOError):
-        fh.close()
-        return None
+        result = subprocess.run(
+            ["wmic", "process", "where",
+             "name='python.exe' and commandline like '%monitor.py%'",
+             "get", "processid", "/format:list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("ProcessId="):
+                pid = int(line.split("=", 1)[1])
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    log.info("Killed orphan monitor.py (pid=%d)", pid)
+                except OSError:
+                    pass
+    except Exception:
+        log.debug("Orphan monitor cleanup failed", exc_info=True)
 
 
 def main():
-    lock_fh = _acquire_lock()
-    if lock_fh is None:
-        log.info("Another watchdog instance is already running (lock: %s). Exiting.", LOCK_PATH)
+    lock = acquire_lock(LOCK_PATH, caller="watchdog")
+    if lock is None:
         sys.exit(0)
+
+    # Clean up orphaned monitor processes from previous crashed runs
+    _kill_orphan_monitors()
+    time.sleep(2)  # let processes die and release locks
 
     delay = MIN_DELAY
     stopping = False
@@ -92,7 +107,12 @@ def main():
                 uptime = time.time() - started
                 if uptime > HANG_TIMEOUT:
                     age = _heartbeat_age()
-                    if age is not None and age > HANG_TIMEOUT:
+                    if age is None:
+                        log.warning("Heartbeat missing after %ds uptime — monitor hung. Killing.", int(uptime))
+                        proc.kill()
+                        proc.wait(timeout=10)
+                        break
+                    if age > HANG_TIMEOUT:
                         log.warning("Heartbeat stale (%ds old) — monitor hung. Killing.", int(age))
                         proc.kill()
                         proc.wait(timeout=10)
@@ -127,6 +147,7 @@ def main():
 
         delay = min(delay * 2, MAX_DELAY)
 
+    release_lock(lock)
     log.info("Bye.")
 
 
