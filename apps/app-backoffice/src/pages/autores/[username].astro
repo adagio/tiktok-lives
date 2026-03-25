@@ -1,0 +1,335 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import { getAuthorDailySummary, getAuthorList, getTopDonors, getTopVentanilla, getTopOpponents } from "@/lib/db";
+import type { AuthorDailySummaryRow, DonorRankingRow, VentanillaRankingRow, OpponentRankingRow } from "@/lib/db";
+
+const username = Astro.params.username;
+
+if (!username) {
+  return Astro.redirect("/autores");
+}
+
+let rows: AuthorDailySummaryRow[] = [];
+let topDonors: DonorRankingRow[] = [];
+let topVentanilla: VentanillaRankingRow[] = [];
+let topOpponents: OpponentRankingRow[] = [];
+let error: string | null = null;
+let authorExists = false;
+
+try {
+  // Check author exists
+  const authors = getAuthorList();
+  authorExists = authors.some((a) => a.username === username);
+  if (!authorExists) {
+    return Astro.redirect("/autores");
+  }
+  rows = getAuthorDailySummary(username);
+  topDonors = getTopDonors(username);
+  topVentanilla = getTopVentanilla(username);
+  topOpponents = getTopOpponents(username);
+} catch (e) {
+  error = e instanceof Error ? e.message : "Error al cargar datos del autor";
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return s > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatBattles(row: AuthorDailySummaryRow): string {
+  if (row.battle_count === 0) return "0";
+  return `${row.battle_count} (${row.wins}W-${row.losses}L-${row.draws}D)`;
+}
+
+// Totals
+const totals = rows.reduce(
+  (acc, r) => ({
+    sessions: acc.sessions + r.session_count,
+    duration: acc.duration + (r.total_duration ?? 0),
+    battles: acc.battles + r.battle_count,
+    points: acc.points + r.total_host_points,
+    wins: acc.wins + r.wins,
+    losses: acc.losses + r.losses,
+    draws: acc.draws + r.draws,
+    guests: acc.guests + r.unique_guests,
+    messages: acc.messages + r.chat_messages,
+  }),
+  { sessions: 0, duration: 0, battles: 0, points: 0, wins: 0, losses: 0, draws: 0, guests: 0, messages: 0 },
+);
+---
+
+<Layout title={`${username} — Autor`}>
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">Error</p>
+      <p class="text-error/70 text-sm">{error}</p>
+      <a href="/autores" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Volver</a>
+    </div>
+  ) : (
+    <>
+      {/* Header */}
+      <div class="mb-8">
+        <a href="/autores" class="text-sm text-text-muted hover:text-text-secondary transition-colors mb-3 inline-flex items-center gap-1">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-3.5 h-3.5" aria-hidden="true">
+            <path fill-rule="evenodd" d="M9.78 4.22a.75.75 0 010 1.06L7.06 8l2.72 2.72a.75.75 0 11-1.06 1.06L5.47 8.53a.75.75 0 010-1.06l3.25-3.25a.75.75 0 011.06 0z" clip-rule="evenodd" />
+          </svg>
+          Autores
+        </a>
+        <h1 class="text-2xl font-bold text-text-primary">{username}</h1>
+        <div class="flex flex-wrap items-center gap-4 mt-2 text-sm text-text-secondary">
+          <span>{rows.length} día{rows.length !== 1 ? "s" : ""}</span>
+          <span>{totals.sessions} sesión{totals.sessions !== 1 ? "es" : ""}</span>
+          <span>{formatDuration(totals.duration)}</span>
+        </div>
+      </div>
+
+      {/* Summary stats cards */}
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Batallas</p>
+          <p class="text-xl font-bold text-text-primary tabular-nums">{totals.battles}</p>
+          {totals.battles > 0 && (
+            <p class="text-xs text-text-secondary mt-0.5">{totals.wins}W-{totals.losses}L-{totals.draws}D</p>
+          )}
+        </div>
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Puntos</p>
+          <p class="text-xl font-bold text-text-primary tabular-nums">{totals.points.toLocaleString()}</p>
+        </div>
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Conectados</p>
+          <p class="text-xl font-bold text-text-primary tabular-nums">{totals.guests.toLocaleString()}</p>
+        </div>
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Mensajes</p>
+          <p class="text-xl font-bold text-text-primary tabular-nums">{totals.messages.toLocaleString()}</p>
+        </div>
+      </div>
+
+      {/* Daily summary table */}
+      <section>
+        <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Resumen por día</h2>
+
+        <div class="bg-card rounded-xl border border-border">
+          {/* Desktop: table */}
+          <div class="hidden md:block overflow-x-auto">
+            <table class="w-full text-sm text-left">
+              <thead>
+                <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+                  <th scope="col" class="py-3 px-3">Fecha</th>
+                  <th scope="col" class="py-3 px-3">Sesiones</th>
+                  <th scope="col" class="py-3 px-3">Duración</th>
+                  <th scope="col" class="py-3 px-3">Batallas</th>
+                  <th scope="col" class="py-3 px-3">Puntos</th>
+                  <th scope="col" class="py-3 px-3">Conectados</th>
+                  <th scope="col" class="py-3 px-3">Mensajes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150">
+                    <td class="py-2.5 px-3 font-medium text-text-primary">{row.day}</td>
+                    <td class="py-2.5 px-3 text-text-secondary tabular-nums">{row.session_count}</td>
+                    <td class="py-2.5 px-3 text-text-secondary tabular-nums">{formatDuration(row.total_duration)}</td>
+                    <td class="py-2.5 px-3 text-text-secondary tabular-nums">{formatBattles(row)}</td>
+                    <td class="py-2.5 px-3 text-text-secondary tabular-nums">{row.total_host_points}</td>
+                    <td class="py-2.5 px-3 text-text-secondary tabular-nums">{row.unique_guests}</td>
+                    <td class="py-2.5 px-3 text-text-secondary tabular-nums">{row.chat_messages.toLocaleString()}</td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colspan="7" class="py-12 text-center text-text-muted">
+                      <p class="text-base mb-1">Sin datos</p>
+                      <p class="text-xs">No hay sesiones para este autor</p>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile: cards */}
+          <div class="md:hidden divide-y divide-border">
+            {rows.map((row) => (
+              <div class="p-4">
+                <div class="font-medium text-text-primary text-sm mb-2">{row.day}</div>
+                <div class="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                  <div class="flex justify-between">
+                    <span class="text-text-muted">Sesiones</span>
+                    <span class="text-text-secondary tabular-nums">{row.session_count}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-text-muted">Duración</span>
+                    <span class="text-text-secondary tabular-nums">{formatDuration(row.total_duration)}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-text-muted">Batallas</span>
+                    <span class="text-text-secondary tabular-nums">{formatBattles(row)}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-text-muted">Puntos</span>
+                    <span class="text-text-secondary tabular-nums">{row.total_host_points}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-text-muted">Conectados</span>
+                    <span class="text-text-secondary tabular-nums">{row.unique_guests}</span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-text-muted">Mensajes</span>
+                    <span class="text-text-secondary tabular-nums">{row.chat_messages.toLocaleString()}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {rows.length === 0 && (
+              <div class="py-12 text-center text-text-muted">
+                <p class="text-base mb-1">Sin datos</p>
+                <p class="text-xs">No hay sesiones para este autor</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Interaction rankings */}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-8">
+
+        {/* Patrones (top 3 MVPs) */}
+        {topDonors.length > 0 && (
+          <section class="lg:col-span-2">
+            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Patrones</h2>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {topDonors.slice(0, 3).map((d, i) => (
+                <div class={`bg-card rounded-xl border p-4 text-center ${i === 0 ? "border-amber-500/50 bg-amber-500/5" : "border-border"}`}>
+                  <p class="text-2xl mb-1">{i === 0 ? "\u{1F451}" : i === 1 ? "\u{1F948}" : "\u{1F949}"}</p>
+                  <p class="font-bold text-text-primary text-sm truncate">@{d.username}</p>
+                  <p class="text-xl font-bold text-amber-400 tabular-nums mt-1">{d.total_diamonds.toLocaleString()}</p>
+                  <p class="text-xs text-text-muted">{d.gift_count} regalo{d.gift_count !== 1 ? "s" : ""}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Top Donadores */}
+        <section>
+          <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Top Donadores</h2>
+          <div class="bg-card rounded-xl border border-border">
+            {topDonors.length > 0 ? (
+              <table class="w-full text-sm text-left">
+                <thead>
+                  <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+                    <th scope="col" class="py-3 px-3 w-8">#</th>
+                    <th scope="col" class="py-3 px-3">Usuario</th>
+                    <th scope="col" class="py-3 px-3 text-right">Diamantes</th>
+                    <th scope="col" class="py-3 px-3 text-right">Regalos</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topDonors.map((d, i) => (
+                    <tr class="border-b border-border last:border-0 hover:bg-card-hover transition-[background-color] duration-150">
+                      <td class="py-2.5 px-3 text-text-muted tabular-nums">{i + 1}</td>
+                      <td class="py-2.5 px-3 font-medium text-text-primary truncate max-w-[160px]">@{d.username}</td>
+                      <td class="py-2.5 px-3 text-right text-amber-400 font-semibold tabular-nums">{d.total_diamonds.toLocaleString()}</td>
+                      <td class="py-2.5 px-3 text-right text-text-secondary tabular-nums">{d.gift_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div class="py-10 text-center text-text-muted">
+                <p class="text-base mb-1">Sin regalos aun</p>
+                <p class="text-xs">Los diamantes apareceran aqui cuando empiecen a llover</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Top Ventanilla */}
+        <section>
+          <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Top Ventanilla</h2>
+          <div class="bg-card rounded-xl border border-border">
+            {topVentanilla.length > 0 ? (
+              <table class="w-full text-sm text-left">
+                <thead>
+                  <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+                    <th scope="col" class="py-3 px-3 w-8">#</th>
+                    <th scope="col" class="py-3 px-3">Usuario</th>
+                    <th scope="col" class="py-3 px-3 text-right">Tiempo</th>
+                    <th scope="col" class="py-3 px-3 text-right">Visitas</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topVentanilla.map((v, i) => (
+                    <tr class="border-b border-border last:border-0 hover:bg-card-hover transition-[background-color] duration-150">
+                      <td class="py-2.5 px-3 text-text-muted tabular-nums">{i + 1}</td>
+                      <td class="py-2.5 px-3 font-medium text-text-primary truncate max-w-[160px]">
+                        {v.nickname ? `${v.nickname}` : `@${v.username}`}
+                        {v.nickname && <span class="text-text-muted text-xs ml-1">@{v.username}</span>}
+                      </td>
+                      <td class="py-2.5 px-3 text-right text-text-secondary font-semibold tabular-nums">{formatDuration(v.total_seconds)}</td>
+                      <td class="py-2.5 px-3 text-right text-text-secondary tabular-nums">{v.visit_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div class="py-10 text-center text-text-muted">
+                <p class="text-base mb-1">Sin conectados aun</p>
+                <p class="text-xs">Aqui apareceran los que mas tiempo pasan en la ventanilla</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Top Contrincantes */}
+        <section class="lg:col-span-2">
+          <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Top Contrincantes</h2>
+          <div class="bg-card rounded-xl border border-border">
+            {topOpponents.length > 0 ? (
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm text-left">
+                  <thead>
+                    <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+                      <th scope="col" class="py-3 px-3 w-8">#</th>
+                      <th scope="col" class="py-3 px-3">Oponente</th>
+                      <th scope="col" class="py-3 px-3 text-right">Batallas</th>
+                      <th scope="col" class="py-3 px-3 text-right">Pts rival</th>
+                      <th scope="col" class="py-3 px-3 text-right">Pts host</th>
+                      <th scope="col" class="py-3 px-3 text-right">W-L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {topOpponents.map((o, i) => (
+                      <tr class="border-b border-border last:border-0 hover:bg-card-hover transition-[background-color] duration-150">
+                        <td class="py-2.5 px-3 text-text-muted tabular-nums">{i + 1}</td>
+                        <td class="py-2.5 px-3 font-medium text-text-primary">@{o.opponent_username}</td>
+                        <td class="py-2.5 px-3 text-right text-text-secondary tabular-nums">{o.total_battles}</td>
+                        <td class="py-2.5 px-3 text-right text-red-400 tabular-nums">{o.total_opponent_score.toLocaleString()}</td>
+                        <td class="py-2.5 px-3 text-right text-emerald-400 tabular-nums">{o.total_host_score.toLocaleString()}</td>
+                        <td class="py-2.5 px-3 text-right text-text-secondary tabular-nums">{o.wins}W-{o.losses}L</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div class="py-10 text-center text-text-muted">
+                <p class="text-base mb-1">Sin batallas aun</p>
+                <p class="text-xs">Los rivales apareceran aqui cuando se enfrenten</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+      </div>
+    </>
+  )}
+</Layout>

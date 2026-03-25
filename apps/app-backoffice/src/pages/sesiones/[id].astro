@@ -14,8 +14,9 @@ import {
   getSessionChatMessages,
   getLatestViewerJoin,
   isSessionActive,
+  getChatAnalysis,
 } from "@/lib/db";
-import type { SessionDetail, ChunkRow, ClipRow, BattleRow, GuestRow, ChatMessageRow } from "@/lib/db";
+import type { SessionDetail, ChunkRow, ClipRow, BattleRow, GuestRow, ChatMessageRow, ChatAnalysisRow } from "@/lib/db";
 import { normalizeScores } from "@/lib/topics";
 import type { TopicScore } from "@/lib/topics";
 
@@ -33,6 +34,7 @@ let guests: GuestRow[] = [];
 let topics: TopicScore[] = [];
 let chatMessages: ChatMessageRow[] = [];
 let chatActive = false;
+let chatAnalysis: { topics: string[]; summary: string } | null = null;
 let latestJoin: { username: string; joined_at: string } | null = null;
 let error: string | null = null;
 
@@ -54,6 +56,16 @@ try {
     // chat_messages table may not exist yet
   }
   latestJoin = getLatestViewerJoin(id);
+
+  // Chat analysis (LLM-generated topics + summary)
+  try {
+    const raw = getChatAnalysis(id);
+    if (raw) {
+      chatAnalysis = { topics: JSON.parse(raw.topics), summary: raw.summary };
+    }
+  } catch {
+    // chat_analysis table may not exist yet
+  }
 
   // Read pre-computed topic scores
   try {
@@ -350,6 +362,19 @@ const dateDisplay = session?.date?.split("T")[0] ?? "";
               </span>
             )}
           </div>
+          {chatAnalysis && (
+            <div class="px-5 py-4 border-b border-border space-y-3">
+              <p class="text-sm text-text-secondary leading-relaxed">{chatAnalysis.summary}</p>
+              <div class="flex flex-wrap gap-1.5">
+                {chatAnalysis.topics.map((topic) => (
+                  <span class="inline-block text-xs font-medium px-2.5 py-1 rounded-full bg-brand-subtle text-brand border border-brand/20">
+                    {topic}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div id="chat-panel" class="max-h-[50vh] overflow-y-auto p-3 space-y-1 chat-panel">
             {chatMessages.length > 0 ? chatMessages.map((msg) => (
               <div class="chat-msg">

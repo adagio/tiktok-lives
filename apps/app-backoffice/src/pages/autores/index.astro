@@ -1,0 +1,102 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import { getAuthorList } from "@/lib/db";
+import type { AuthorListRow } from "@/lib/db";
+
+let authors: AuthorListRow[] = [];
+let error: string | null = null;
+
+try {
+  authors = getAuthorList();
+} catch (e) {
+  error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+---
+
+<Layout title="Autores">
+  <h1 class="text-2xl font-bold text-text-primary mb-6">Autores</h1>
+
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">No se pudieron cargar los autores</p>
+      <p class="text-error/70 text-sm">Verificá que <code class="bg-error-subtle px-1.5 py-0.5 rounded">clips.db</code> exista y tenga datos.</p>
+      <a href="/autores" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Reintentar</a>
+    </div>
+  ) : (
+    <>
+      <p class="text-sm text-text-secondary mb-4">{authors.length} autor{authors.length !== 1 ? "es" : ""}</p>
+
+      <div class="bg-card rounded-xl border border-border">
+        <!-- Desktop: table -->
+        <div class="hidden md:block overflow-x-auto">
+          <table class="w-full text-sm text-left">
+            <thead>
+              <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+                <th scope="col" class="py-3 px-3">Autor</th>
+                <th scope="col" class="py-3 px-3">Sesiones</th>
+                <th scope="col" class="py-3 px-3">Duración total</th>
+                <th scope="col" class="py-3 px-3">Primera sesión</th>
+                <th scope="col" class="py-3 px-3">Última sesión</th>
+              </tr>
+            </thead>
+            <tbody>
+              {authors.map((a) => (
+                <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150 cursor-pointer" onclick={`window.location='/autores/${a.username}'`}>
+                  <td class="py-2.5 px-3 font-medium text-text-primary">{a.username}</td>
+                  <td class="py-2.5 px-3 text-text-secondary tabular-nums">{a.total_sessions}</td>
+                  <td class="py-2.5 px-3 text-text-secondary tabular-nums">{formatDuration(a.total_duration)}</td>
+                  <td class="py-2.5 px-3 text-text-secondary">{a.first_session}</td>
+                  <td class="py-2.5 px-3 text-text-secondary">{a.last_session}</td>
+                </tr>
+              ))}
+              {authors.length === 0 && (
+                <tr>
+                  <td colspan="5" class="py-12 text-center text-text-muted">
+                    <p class="text-base mb-1">Sin autores</p>
+                    <p class="text-xs">No hay sesiones grabadas aún</p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Mobile: cards -->
+        <div class="md:hidden divide-y divide-border">
+          {authors.map((a) => (
+            <a href={`/autores/${a.username}`} class="block p-4 hover:bg-card-hover transition-[background-color] duration-150">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0 flex-1">
+                  <span class="font-medium text-text-primary text-sm">{a.username}</span>
+                  <div class="flex items-center gap-3 mt-1.5 text-xs text-text-secondary">
+                    <span class="tabular-nums">{a.total_sessions} sesión{a.total_sessions !== 1 ? "es" : ""}</span>
+                    <span class="tabular-nums">{formatDuration(a.total_duration)}</span>
+                  </div>
+                  <div class="text-xs text-text-muted mt-1">
+                    Última: {a.last_session}
+                  </div>
+                </div>
+              </div>
+            </a>
+          ))}
+          {authors.length === 0 && (
+            <div class="py-12 text-center text-text-muted">
+              <p class="text-base mb-1">Sin autores</p>
+              <p class="text-xs">No hay sesiones grabadas aún</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  )}
+</Layout>

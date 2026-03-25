@@ -65,10 +65,11 @@ log.addHandler(_fh)
 @dataclass
 class ActiveSession:
     username: str
-    process: Popen
-    path: Path
     started_at: float
+    process: Popen | None = None
+    path: Path | None = None
     session_id: int | None = None
+    monitor_only: bool = False
     room_id: str | None = None
     last_battle_id: int | None = None
     spy: VentanillaSpy | None = None
@@ -127,6 +128,8 @@ class Monitor:
         """Remove entries for ffmpeg processes that have exited."""
         finished = []
         for username, sess in self.active.items():
+            if sess.monitor_only:
+                continue  # monitor-only sessions are reaped async
             ret = sess.process.poll()
             if ret is not None:
                 elapsed = time.time() - sess.started_at
@@ -175,6 +178,28 @@ class Monitor:
         )
         self.active[username] = sess
         log.info("🔴 Recording started for @%s → %s", username, path)
+        return sess
+
+    def _start_monitor_session(self, username: str) -> ActiveSession:
+        """Start a monitor-only session (no recording)."""
+        started_at = time.time()
+
+        session_id = None
+        try:
+            date_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            session_id = create_session(DB_PATH, username, date_iso, "", pid=0)
+            log.info("Created monitor-only session %d for @%s", session_id, username)
+        except Exception:
+            log.warning("Failed to create session for @%s", username, exc_info=True)
+
+        sess = ActiveSession(
+            username=username,
+            started_at=started_at,
+            session_id=session_id,
+            monitor_only=True,
+        )
+        self.active[username] = sess
+        log.info("👁️ Monitoring started for @%s (no recording)", username)
         return sess
 
     async def _launch_spy(self, sess: ActiveSession):
@@ -228,6 +253,15 @@ class Monitor:
         except Exception:
             log.warning("ChatSpy for @%s crashed", label, exc_info=True)
 
+    async def _revive_spies(self, sess: ActiveSession):
+        """Restart spies that died while the session is still active."""
+        if sess.spy_task and sess.spy_task.done():
+            log.info("🔌 Reviving VentanillaSpy for @%s", sess.username)
+            await self._launch_spy(sess)
+        if sess.chat_task and sess.chat_task.done():
+            log.info("💬 Reviving ChatSpy for @%s", sess.username)
+            await self._launch_chat_spy(sess)
+
     async def _launch_opponent_chat_spy(self, sess: ActiveSession, opponent_username: str, battle_id: int):
         """Launch ChatSpy for the opponent's room during a battle."""
         if sess.session_id is None:
@@ -254,7 +288,7 @@ class Monitor:
 
     async def _launch_treasure_spy(self, sess: ActiveSession, opponent_username: str):
         """Launch TreasureSpy against the opponent's live room."""
-        spy = TreasureSpy(opponent_username)
+        spy = TreasureSpy(opponent_username, session_id=sess.session_id, battle_id=sess.last_battle_id, db_path=DB_PATH)
         sess.treasure_spy = spy
         sess.treasure_task = asyncio.create_task(self._run_treasure_spy_safe(spy, opponent_username))
 
@@ -369,8 +403,11 @@ class Monitor:
         """Graceful shutdown: terminate recordings, stop spies."""
         log.info("Shutting down...")
         for username, sess in self.active.items():
-            log.info("Terminating recording for @%s", username)
-            sess.process.terminate()
+            if sess.process:
+                log.info("Terminating recording for @%s", username)
+                sess.process.terminate()
+            else:
+                log.info("Stopping monitor-only session for @%s", username)
             if sess.spy_task and not sess.spy_task.done():
                 sess.spy_task.cancel()
             if sess.treasure_task and not sess.treasure_task.done():
@@ -390,6 +427,8 @@ class Monitor:
 
         # Wait for ffmpeg processes
         for username, sess in self.active.items():
+            if not sess.process:
+                continue
             try:
                 sess.process.wait(timeout=10)
             except Exception:
@@ -476,12 +515,37 @@ class Monitor:
                 username = user["username"]
 
                 if username in self.active:
+                    sess = self.active[username]
+                    # For monitor-only sessions, check if live ended
+                    if sess.monitor_only:
+                        try:
+                            still_live = await asyncio.wait_for(asyncio.to_thread(check_is_live, username), timeout=45)
+                        except (asyncio.TimeoutError, Exception):
+                            still_live = True  # assume still live on error
+                        if not still_live:
+                            elapsed = time.time() - sess.started_at
+                            log.info("👁️ Live ended for @%s (%.0fs, monitor-only)", username, elapsed)
+                            if sess.session_id is not None:
+                                try:
+                                    update_session_duration(DB_PATH, sess.session_id, elapsed)
+                                except Exception:
+                                    log.warning("Failed to update session duration for @%s", username, exc_info=True)
+                            if sess.spy_task and not sess.spy_task.done():
+                                sess.spy_task.cancel()
+                            if sess.chat_task and not sess.chat_task.done():
+                                sess.chat_task.cancel()
+                            if sess.treasure_task and not sess.treasure_task.done():
+                                sess.treasure_task.cancel()
+                            if sess.opponent_chat_task and not sess.opponent_chat_task.done():
+                                sess.opponent_chat_task.cancel()
+                            del self.active[username]
+                            continue
+                    await self._revive_spies(sess)
                     try:
                         battle_result = await asyncio.wait_for(asyncio.to_thread(self._check_battle_sync, username), timeout=30)
                     except asyncio.TimeoutError:
                         log.warning("Timeout: _check_battle_sync for @%s", username)
                         battle_result = None
-                    sess = self.active[username]
                     if battle_result == "__ended__":
                         await self._stop_treasure_spy(sess)
                         await self._stop_opponent_chat_spy(sess)
@@ -508,7 +572,8 @@ class Monitor:
                     result = None
 
                 if result is not None:
-                    sess = self._start_session(username, result)
+                    should_record = user.get("record", True)
+                    sess = self._start_session(username, result) if should_record else self._start_monitor_session(username)
                     try:
                         battle_result = await asyncio.wait_for(asyncio.to_thread(self._check_battle_sync, username), timeout=30)
                     except asyncio.TimeoutError:
@@ -545,17 +610,12 @@ class Monitor:
 
 
 def main():
-    import msvcrt
-
     from TikTokLive.client.web.web_settings import WebDefaults
 
-    # Acquire exclusive lock to prevent duplicate instances
-    lock_file = open(LOCK_PATH, "w")
-    try:
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-    except (OSError, IOError):
-        log.error("Another monitor instance is already running (lock: %s)", LOCK_PATH)
-        lock_file.close()
+    from lockfile import acquire_lock, release_lock
+
+    lock = acquire_lock(LOCK_PATH, caller="monitor")
+    if lock is None:
         sys.exit(1)
 
     api_key = os.environ.get("SIGN_API_KEY")
@@ -577,11 +637,7 @@ def main():
     try:
         asyncio.run(monitor.run())
     finally:
-        try:
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        except Exception:
-            pass
-        lock_file.close()
+        release_lock(lock)
 
 
 if __name__ == "__main__":

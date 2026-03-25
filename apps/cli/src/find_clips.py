@@ -7,6 +7,7 @@ import struct
 import subprocess
 import sys
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -101,6 +102,82 @@ def extract_clip(ts_file: Path, start: float, duration: float, out_path: Path) -
     return result.returncode == 0
 
 
+def search_chat(args) -> None:
+    """Search chat chunks by semantic similarity."""
+    conn = sqlite3.connect(str(DB_PATH))
+
+    query_sql = (
+        "SELECT cc.id, cc.start_time, cc.end_time, cc.text, cc.embedding, "
+        "cc.message_count, s.username, s.date, s.id "
+        "FROM chat_chunks cc "
+        "JOIN sessions s ON cc.session_id = s.id "
+        "WHERE cc.embedding IS NOT NULL"
+    )
+    if args.user:
+        query_sql += " AND s.username = ?"
+        rows = conn.execute(query_sql, (args.user,)).fetchall()
+    else:
+        rows = conn.execute(query_sql).fetchall()
+
+    conn.close()
+
+    if not rows:
+        print("No chat chunks found." + (f" (user={args.user})" if args.user else ""))
+        print("Run index_chat.py first.")
+        return
+
+    # Embed query
+    print(f"Loading model ...", flush=True)
+    model = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(MODELS_DIR))
+    query_emb = model.encode(
+        f"query: {args.query}", normalize_embeddings=True,
+    ).reshape(1, -1)
+
+    # Compute similarities
+    embeddings = np.stack([blob_to_array(row[4], dim=1024) for row in rows])
+    scores = (embeddings @ query_emb.T).flatten()
+
+    indices = np.argsort(scores)[::-1]
+
+    print(f"\nQuery: \"{args.query}\"  |  Source: chat")
+    print(f"Searched {len(rows)} chat chunks\n")
+    print("=" * 80)
+
+    shown = 0
+    for idx in indices:
+        score = float(scores[idx])
+        if score < args.min_score:
+            break
+        if shown >= args.max_clips:
+            break
+
+        row = rows[idx]
+        chunk_id, start_time, end_time, text, _, msg_count, username, date, session_id = row
+
+        # Parse time for display
+        try:
+            t_start = datetime.fromisoformat(start_time).strftime("%H:%M")
+            t_end = datetime.fromisoformat(end_time).strftime("%H:%M")
+        except (ValueError, TypeError):
+            t_start = start_time[:16]
+            t_end = end_time[:16]
+
+        shown += 1
+        print(f"\n#{shown}  Score: {score:.3f}  |  {username}/{date.split('T')[0]}")
+        print(f"  Time: {t_start} - {t_end}  |  {msg_count} messages")
+        # Show first 300 chars of chat
+        snippet = text[:300].replace("\n", "\n  ")
+        print(f"  Chat:\n  {snippet}")
+        if len(text) > 300:
+            print(f"  ... ({len(text) - 300} more chars)")
+
+    print("\n" + "=" * 80)
+    if shown == 0:
+        print("No results above minimum score.")
+    else:
+        print(f"\n{shown} chat moments found.")
+
+
 def main():
     import argparse
 
@@ -118,10 +195,20 @@ def main():
                         help="Min chunk duration in seconds (default: 6)")
     parser.add_argument("--extract", action="store_true",
                         help="Extract clips to clips/ folder and save to DB")
+    parser.add_argument("--source", choices=["transcript", "chat", "all"], default="transcript",
+                        help="Search source: transcript (SRT chunks), chat (audience messages), or all (default: transcript)")
     args = parser.parse_args()
 
     if not DB_PATH.exists():
         sys.exit(f"Database not found: {DB_PATH}\nRun index_session.py first.")
+
+    if args.source in ("chat", "all"):
+        search_chat(args)
+        if args.source == "chat":
+            return
+        print("\n\n" + "=" * 80)
+        print("TRANSCRIPT RESULTS:")
+        print("=" * 80)
 
     conn = sqlite3.connect(str(DB_PATH))
 

@@ -1,18 +1,37 @@
 """Watchdog — restarts monitor.py if it crashes or hangs, with exponential backoff."""
 
+import logging
 import signal
 import subprocess
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 MONITOR_SCRIPT = Path(__file__).resolve().parent / "monitor.py"
 HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / "monitor.heartbeat"
+LOG_PATH = Path(__file__).resolve().parent.parent / "watchdog.log"
+LOCK_PATH = Path(__file__).resolve().parent.parent / "watchdog.lock"
 MIN_DELAY = 5       # seconds after first crash
 MAX_DELAY = 300     # cap at 5 minutes
 HEALTHY_AFTER = 120  # if it ran longer than this, reset delay
 HANG_TIMEOUT = 120   # kill monitor if heartbeat older than this
 POLL_INTERVAL = 10   # seconds between poll checks
+
+# --- Logging setup ---
+
+log = logging.getLogger("watchdog")
+log.setLevel(logging.INFO)
+
+_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+_sh = logging.StreamHandler(sys.stderr)
+_sh.setFormatter(_fmt)
+log.addHandler(_sh)
+
+_fh = RotatingFileHandler(LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+_fh.setFormatter(_fmt)
+log.addHandler(_fh)
 
 
 def _heartbeat_age() -> float | None:
@@ -24,7 +43,25 @@ def _heartbeat_age() -> float | None:
         return None
 
 
+def _acquire_lock():
+    """Acquire exclusive lockfile. Returns file handle or None if already locked."""
+    import msvcrt
+
+    fh = open(LOCK_PATH, "w")
+    try:
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return fh
+    except (OSError, IOError):
+        fh.close()
+        return None
+
+
 def main():
+    lock_fh = _acquire_lock()
+    if lock_fh is None:
+        log.info("Another watchdog instance is already running (lock: %s). Exiting.", LOCK_PATH)
+        sys.exit(0)
+
     delay = MIN_DELAY
     stopping = False
 
@@ -36,7 +73,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
 
     while not stopping:
-        print(f"[watchdog] Starting monitor.py ...", flush=True)
+        log.info("Starting monitor.py ...")
         started = time.time()
 
         proc = subprocess.Popen(
@@ -56,10 +93,7 @@ def main():
                 if uptime > HANG_TIMEOUT:
                     age = _heartbeat_age()
                     if age is not None and age > HANG_TIMEOUT:
-                        print(
-                            f"[watchdog] Heartbeat stale ({age:.0f}s old) — monitor hung. Killing.",
-                            flush=True,
-                        )
+                        log.warning("Heartbeat stale (%ds old) — monitor hung. Killing.", int(age))
                         proc.kill()
                         proc.wait(timeout=10)
                         break
@@ -78,17 +112,13 @@ def main():
         code = proc.returncode
 
         if stopping:
-            print(f"[watchdog] Stopped (monitor exit={code}).", flush=True)
+            log.info("Stopped (monitor exit=%s).", code)
             break
 
         if elapsed >= HEALTHY_AFTER:
             delay = MIN_DELAY  # was stable, reset backoff
 
-        print(
-            f"[watchdog] Monitor exited (code={code}) after {elapsed:.0f}s. "
-            f"Restarting in {delay}s ...",
-            flush=True,
-        )
+        log.info("Monitor exited (code=%s) after %ds. Restarting in %ds ...", code, int(elapsed), delay)
 
         # Interruptible sleep
         deadline = time.time() + delay
@@ -97,7 +127,7 @@ def main():
 
         delay = min(delay * 2, MAX_DELAY)
 
-    print("[watchdog] Bye.", flush=True)
+    log.info("Bye.")
 
 
 if __name__ == "__main__":

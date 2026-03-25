@@ -8,4 +8,7 @@ dependencies = [
     "python-dotenv",
     "sentence-transformers",
     "google-genai",
+    "tzdata",
+    "groq",
+    "assemblyai",
 ]

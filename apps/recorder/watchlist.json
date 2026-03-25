@@ -3,6 +3,8 @@
   "users": [
     {"username": "alejandra_blankita", "enabled": true},
     {"username": "kelyalvarezh", "enabled": true},
-    {"username": "xanaave", "enabled": true}
+    {"username": "xanaave", "enabled": true, "record": false},
+    {"username": "selektorleandread", "enabled": true, "record": false},
+    {"username": "soymikevnzla6", "enabled": true, "record": false}
   ]
 }

@@ -1,0 +1,124 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import LocalTime from "@/components/LocalTime.astro";
+import {
+  getTopByDuration,
+  getTopByGuests,
+  getTopByPoints,
+  getTopByChatMessages,
+  getTopByTranscriptDensity,
+  getTopByBattles,
+  getTopByUniqueViewers,
+} from "@/lib/db";
+import type { StatSessionRow } from "@/lib/db";
+
+const sections: { title: string; emoji: string; rows: StatSessionRow[]; format: (v: number) => string; unit: string }[] = [
+  {
+    title: "Mayor duracion",
+    emoji: "\u{23F1}",
+    rows: getTopByDuration(),
+    format: (v) => {
+      const h = Math.floor(v / 3600);
+      const m = Math.floor((v % 3600) / 60);
+      return h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
+    },
+    unit: "",
+  },
+  {
+    title: "Mas guests en ventanilla",
+    emoji: "\u{1F399}",
+    rows: getTopByGuests(),
+    format: (v) => v.toLocaleString(),
+    unit: "guests",
+  },
+  {
+    title: "Mas puntos en batallas",
+    emoji: "\u{2694}",
+    rows: getTopByPoints(),
+    format: (v) => v.toLocaleString(),
+    unit: "pts",
+  },
+  {
+    title: "Mas mensajes de chat",
+    emoji: "\u{1F4AC}",
+    rows: getTopByChatMessages(),
+    format: (v) => v.toLocaleString(),
+    unit: "msgs",
+  },
+  {
+    title: "Mayor densidad de transcripcion",
+    emoji: "\u{1F4DD}",
+    rows: getTopByTranscriptDensity(),
+    format: (v) => v.toLocaleString(),
+    unit: "chunks",
+  },
+  {
+    title: "Mas batallas",
+    emoji: "\u{1F525}",
+    rows: getTopByBattles(),
+    format: (v) => v.toLocaleString(),
+    unit: "batallas",
+  },
+  {
+    title: "Mas viewers unicos",
+    emoji: "\u{1F465}",
+    rows: getTopByUniqueViewers(),
+    format: (v) => v.toLocaleString(),
+    unit: "viewers",
+  },
+];
+---
+
+<Layout title="Stats">
+  <div class="mb-8">
+    <h1 class="text-2xl font-bold text-text-primary">Stats</h1>
+    <p class="text-sm text-text-secondary mt-1">Top 5 sesiones por categoria</p>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    {sections.map((section) => (
+      <section class="bg-card rounded-xl border border-border p-5">
+        <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4 flex items-center gap-2">
+          <span class="text-lg">{section.emoji}</span>
+          {section.title}
+        </h2>
+        {section.rows.length > 0 ? (
+          <div class="space-y-2">
+            {section.rows.map((row, i) => {
+              const maxVal = section.rows[0].value;
+              const pct = maxVal > 0 ? (row.value / maxVal) * 100 : 0;
+              return (
+                <a href={`/sesiones/${row.session_id}`} class="flex items-center gap-3 group">
+                  <span class="text-xs font-bold text-text-muted w-5 text-right tabular-nums">{i + 1}</span>
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="text-sm font-medium text-text-primary group-hover:text-brand transition-colors truncate">
+                        @{row.username}
+                      </span>
+                      <span class="text-xs font-mono tabular-nums text-text-secondary ml-2 shrink-0">
+                        {section.format(row.value)} {section.unit}
+                      </span>
+                    </div>
+                    <div class="h-1.5 rounded-full bg-surface-raised overflow-hidden">
+                      <div
+                        class="h-full rounded-full bg-brand/60 transition-all duration-500"
+                        style={`width: ${Math.max(pct, 3)}%`}
+                      />
+                    </div>
+                    <div class="text-xs text-text-muted mt-0.5">
+                      <LocalTime utc={row.date} fmt="date" />
+                    </div>
+                  </div>
+                </a>
+              );
+            })}
+          </div>
+        ) : (
+          <p class="text-sm text-text-muted">Sin datos</p>
+        )}
+      </section>
+    ))}
+  </div>
+</Layout>

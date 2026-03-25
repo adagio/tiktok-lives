@@ -1,0 +1,46 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import { getDays } from "@/lib/db";
+
+const days = getDays();
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+---
+
+<Layout title="Dias">
+  <div class="mb-8">
+    <h1 class="text-2xl font-bold text-text-primary">Dias</h1>
+    <p class="text-sm text-text-secondary mt-1">{days.length} dias con actividad</p>
+  </div>
+
+  <div class="space-y-2">
+    {days.map((day) => {
+      const authors = day.authors.split(",");
+      return (
+        <a href={`/dias/${day.day}`} class="block bg-card rounded-xl border border-border p-4 hover:border-brand/30 transition-colors">
+          <div class="flex items-center justify-between">
+            <div>
+              <span class="text-lg font-bold text-text-primary">{day.day}</span>
+              <div class="flex items-center gap-3 mt-1 text-sm text-text-secondary">
+                <span>{day.session_count} sesion{day.session_count !== 1 ? "es" : ""}</span>
+                <span>{formatDuration(day.total_duration)}</span>
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-1.5 justify-end">
+              {authors.map((author) => (
+                <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-brand-subtle text-brand">@{author}</span>
+              ))}
+            </div>
+          </div>
+        </a>
+      );
+    })}
+  </div>
+</Layout>

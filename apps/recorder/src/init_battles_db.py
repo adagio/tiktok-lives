@@ -59,6 +59,23 @@ CREATE TABLE IF NOT EXISTS viewer_joins (
 );
 CREATE INDEX IF NOT EXISTS idx_viewer_joins_session ON viewer_joins(session_id);
 CREATE INDEX IF NOT EXISTS idx_viewer_joins_joined ON viewer_joins(joined_at);
+
+CREATE TABLE IF NOT EXISTS gifts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES sessions(id),
+  battle_id INTEGER,
+  room_username TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  username TEXT NOT NULL,
+  gift_name TEXT,
+  diamond_count INTEGER NOT NULL DEFAULT 0,
+  repeat_count INTEGER NOT NULL DEFAULT 1,
+  event_type TEXT NOT NULL DEFAULT 'gift',
+  timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gifts_session ON gifts(session_id);
+CREATE INDEX IF NOT EXISTS idx_gifts_room ON gifts(room_username);
+CREATE INDEX IF NOT EXISTS idx_gifts_user ON gifts(user_id);
 """
 
 
@@ -70,7 +87,7 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.executescript(SQL)
-        print("battles + guests + chat_messages + viewer_joins tables created (or already exist).")
+        print("battles + guests + chat_messages + viewer_joins + gifts tables created (or already exist).")
     finally:
         conn.close()
 

@@ -29,3 +29,4 @@ __pycache__/
 *.log
 monitor.heartbeat
 monitor.lock
+watchdog.lock

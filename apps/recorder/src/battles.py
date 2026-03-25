@@ -303,6 +303,40 @@ def save_viewer_joins(db_path: str, joins: list[dict]) -> None:
         conn.close()
 
 
+def save_gifts(db_path: str, gifts: list[dict]) -> None:
+    """Insert a batch of gift/envelope events."""
+    if not gifts:
+        return
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS gifts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL REFERENCES sessions(id),
+                battle_id INTEGER,
+                room_username TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                gift_name TEXT,
+                diamond_count INTEGER NOT NULL DEFAULT 0,
+                repeat_count INTEGER NOT NULL DEFAULT 1,
+                event_type TEXT NOT NULL DEFAULT 'gift',
+                timestamp TEXT NOT NULL
+            )"""
+        )
+        conn.executemany(
+            """INSERT INTO gifts
+               (session_id, battle_id, room_username, user_id, username,
+                gift_name, diamond_count, repeat_count, event_type, timestamp)
+               VALUES (:session_id, :battle_id, :room_username, :user_id, :username,
+                :gift_name, :diamond_count, :repeat_count, :event_type, :timestamp)""",
+            gifts,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def save_chat_messages(db_path: str, messages: list[dict]) -> None:
     """Insert a batch of chat messages."""
     if not messages:
