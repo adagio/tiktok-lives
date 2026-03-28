@@ -8,6 +8,8 @@ export default defineConfig({
   vite: {
     plugins: [tailwindcss()],
     server: {
+      host: true,
+      allowedHosts: ["tiktok-clipper.ship"],
       fs: {
         allow: ["../.."],
       },

@@ -2,7 +2,7 @@
   "name": "app-backoffice",
   "type": "module",
   "scripts": {
-    "dev": "astro dev --port 4321",
+    "dev": "astro dev --port 80 --host",
     "build": "astro build",
     "preview": "astro preview --port 4321"
   },
