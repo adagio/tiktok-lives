@@ -1,0 +1,204 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import LocalTime from "@/components/LocalTime.astro";
+import { getGlobalDonors, getGiftCatalogStats } from "@/lib/db";
+import type { GlobalDonorRow, GiftCatalogRow } from "@/lib/db";
+
+let donors: GlobalDonorRow[] = [];
+let giftStats: GiftCatalogRow[] = [];
+let error: string | null = null;
+
+try {
+  donors = getGlobalDonors(100);
+  giftStats = getGiftCatalogStats();
+} catch (e) {
+  error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
+}
+
+const totalDiamonds = donors.reduce((sum, d) => sum + d.total_diamonds, 0);
+const totalCoins = donors.reduce((sum, d) => sum + (d.total_coins || 0), 0);
+const totalGifts = donors.reduce((sum, d) => sum + d.total_repeats, 0);
+
+function formatDiamonds(n: number): string {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return n.toString();
+}
+
+function formatUsd(diamonds: number): string {
+  return `$${(diamonds * 0.005).toFixed(2)}`;
+}
+
+function rankBadge(index: number): string {
+  if (index === 0) return "bg-amber-400/20 text-amber-300 border-amber-400/30";
+  if (index === 1) return "bg-gray-300/15 text-gray-300 border-gray-400/30";
+  if (index === 2) return "bg-orange-400/15 text-orange-300 border-orange-400/30";
+  return "bg-surface text-text-muted border-border";
+}
+---
+
+<Layout title="Donadores">
+  <h1 class="text-2xl font-bold text-text-primary mb-2">Donadores</h1>
+  <p class="text-sm text-text-secondary mb-6">Ranking global de donadores por valor en diamantes</p>
+
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">Error</p>
+      <p class="text-error/70 text-sm">{error}</p>
+    </div>
+  ) : (
+    <>
+      {/* Summary cards */}
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Donadores</p>
+          <p class="text-2xl font-bold text-text-primary">{donors.length}</p>
+        </div>
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Total Diamonds</p>
+          <p class="text-2xl font-bold text-amber-400">{formatDiamonds(totalDiamonds)}</p>
+        </div>
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Valor USD</p>
+          <p class="text-2xl font-bold text-emerald-400">{formatUsd(totalDiamonds)}</p>
+        </div>
+        <div class="bg-card rounded-xl border border-border p-4">
+          <p class="text-xs text-text-muted uppercase tracking-wider mb-1">Gifts enviados</p>
+          <p class="text-2xl font-bold text-text-primary">{totalGifts.toLocaleString()}</p>
+        </div>
+      </div>
+
+      {/* Top 3 podium */}
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        {donors.slice(0, 3).map((donor, i) => (
+          <div class={`bg-card rounded-xl border p-5 ${i === 0 ? 'border-amber-400/40 md:order-2' : i === 1 ? 'border-gray-400/30 md:order-1' : 'border-orange-400/30 md:order-3'}`}>
+            <div class="flex items-center gap-3 mb-3">
+              <span class={`inline-flex items-center justify-center w-8 h-8 rounded-full border text-sm font-bold ${rankBadge(i)}`}>
+                {i + 1}
+              </span>
+              <div class="min-w-0">
+                <p class="font-bold text-text-primary truncate">{donor.username}</p>
+                <p class="text-xs text-text-muted">{donor.sessions} sessions, {donor.streamers} streamer{donor.streamers > 1 ? 's' : ''}</p>
+              </div>
+            </div>
+            <div class="flex items-baseline gap-2">
+              <span class="text-xl font-bold text-amber-400">{formatDiamonds(donor.total_diamonds)}</span>
+              <span class="text-xs text-text-muted">diamonds</span>
+              <span class="text-xs text-emerald-400 ml-auto">{formatUsd(donor.total_diamonds)}</span>
+            </div>
+            <div class="flex items-center gap-3 mt-2 text-xs text-text-secondary">
+              <span>{donor.gift_count} gifts</span>
+              {donor.top_gift && <span class="bg-surface rounded px-1.5 py-0.5">{donor.top_gift}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Full ranking table */}
+      <div class="bg-card rounded-xl border border-border">
+        <div class="hidden md:block overflow-x-auto">
+          <table class="w-full text-sm text-left">
+            <thead>
+              <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+                <th scope="col" class="py-3 px-3 w-12">#</th>
+                <th scope="col" class="py-3 px-3">Usuario</th>
+                <th scope="col" class="py-3 px-3 text-right">Diamonds</th>
+                <th scope="col" class="py-3 px-3 text-right">USD</th>
+                <th scope="col" class="py-3 px-3 text-right">Gifts</th>
+                <th scope="col" class="py-3 px-3">Top Gift</th>
+                <th scope="col" class="py-3 px-3">Para</th>
+                <th scope="col" class="py-3 px-3 text-right">Sessions</th>
+                <th scope="col" class="py-3 px-3">Ultimo gift</th>
+              </tr>
+            </thead>
+            <tbody>
+              {donors.map((donor, i) => (
+                <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150">
+                  <td class="py-2.5 px-3">
+                    <span class={`inline-flex items-center justify-center w-6 h-6 rounded-full border text-xs font-bold ${rankBadge(i)}`}>
+                      {i + 1}
+                    </span>
+                  </td>
+                  <td class="py-2.5 px-3 font-medium text-text-primary">{donor.username}</td>
+                  <td class="py-2.5 px-3 text-right tabular-nums text-amber-400 font-medium">{donor.total_diamonds.toLocaleString()}</td>
+                  <td class="py-2.5 px-3 text-right tabular-nums text-emerald-400">{formatUsd(donor.total_diamonds)}</td>
+                  <td class="py-2.5 px-3 text-right tabular-nums text-text-secondary">{donor.total_repeats.toLocaleString()}</td>
+                  <td class="py-2.5 px-3">
+                    {donor.top_gift && (
+                      <span class="inline-block bg-surface rounded px-1.5 py-0.5 text-xs text-text-secondary">{donor.top_gift}</span>
+                    )}
+                  </td>
+                  <td class="py-2.5 px-3">
+                    {donor.top_receiver && (
+                      <a href={`/autores/${donor.top_receiver}`} class="text-brand hover:text-brand-hover text-xs font-medium">{donor.top_receiver}</a>
+                    )}
+                  </td>
+                  <td class="py-2.5 px-3 text-right tabular-nums text-text-secondary">{donor.sessions}</td>
+                  <td class="py-2.5 px-3 text-text-muted text-xs">
+                    {donor.last_gift && <LocalTime utc={donor.last_gift} fmt="date" />}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Mobile card layout */}
+        <div class="md:hidden divide-y divide-border">
+          {donors.map((donor, i) => (
+            <div class="p-4">
+              <div class="flex items-center gap-3">
+                <span class={`inline-flex items-center justify-center w-7 h-7 rounded-full border text-xs font-bold shrink-0 ${rankBadge(i)}`}>
+                  {i + 1}
+                </span>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center justify-between">
+                    <span class="font-medium text-text-primary text-sm truncate">{donor.username}</span>
+                    <span class="text-amber-400 font-bold tabular-nums">{formatDiamonds(donor.total_diamonds)}</span>
+                  </div>
+                  <div class="flex items-center gap-3 mt-1 text-xs text-text-secondary">
+                    <span class="text-emerald-400">{formatUsd(donor.total_diamonds)}</span>
+                    <span>{donor.total_repeats} gifts</span>
+                    {donor.top_receiver && <span class="text-brand">{donor.top_receiver}</span>}
+                    {donor.top_gift && <span class="bg-surface rounded px-1.5 py-0.5">{donor.top_gift}</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Gift catalog */}
+      <h2 class="text-xl font-bold text-text-primary mt-10 mb-4">Catalogo de Gifts</h2>
+      <div class="bg-card rounded-xl border border-border overflow-x-auto">
+        <table class="w-full text-sm text-left">
+          <thead>
+            <tr class="border-b border-border text-text-muted text-xs uppercase tracking-wider">
+              <th scope="col" class="py-3 px-3">Gift</th>
+              <th scope="col" class="py-3 px-3 text-right">Diamonds</th>
+              <th scope="col" class="py-3 px-3 text-right">Coins</th>
+              <th scope="col" class="py-3 px-3 text-right">Enviados</th>
+              <th scope="col" class="py-3 px-3 text-right">Total Diamonds</th>
+              <th scope="col" class="py-3 px-3 text-right">Donadores</th>
+            </tr>
+          </thead>
+          <tbody>
+            {giftStats.map((g) => (
+              <tr class="border-b border-border hover:bg-card-hover transition-[background-color] duration-150">
+                <td class="py-2 px-3 font-medium text-text-primary">{g.gift_name}</td>
+                <td class="py-2 px-3 text-right tabular-nums text-amber-400">{g.diamond_count}</td>
+                <td class="py-2 px-3 text-right tabular-nums text-text-secondary">{g.coin_cost ?? '—'}</td>
+                <td class="py-2 px-3 text-right tabular-nums text-text-secondary">{g.total_sent.toLocaleString()}</td>
+                <td class="py-2 px-3 text-right tabular-nums text-amber-400 font-medium">{g.total_diamonds.toLocaleString()}</td>
+                <td class="py-2 px-3 text-right tabular-nums text-text-secondary">{g.unique_senders}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  )}
+</Layout>

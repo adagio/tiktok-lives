@@ -1,9 +1,11 @@
-"""Extract topics and summaries from chat using Gemini 2.5 Flash.
+"""Extract topics and summaries from chat via LLM providers.
 
-Analyzes indexed chat chunks per session, stores results in SQLite.
+Processes sessions one at a time, skipping already-analyzed ones.
+Adaptive rate limiting tracks actual API responses per provider.
+Falls back between providers on rate limit (Gemini → Groq → wait).
 
 Usage:
-    cd apps/cli && uv run src/analyze_chat.py [--force] [--session ID]
+    cd apps/cli && uv run src/analyze_chat.py [--force] [--session ID] [--provider gemini|groq|auto]
 """
 
 import json
@@ -16,7 +18,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from google import genai
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 load_dotenv(REPO_ROOT / ".env")
@@ -25,8 +26,8 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 DB_PATH = REPO_ROOT / "clips.db"
-GEMINI_MODEL = "gemini-2.0-flash-lite"
 LOCAL_TZ = ZoneInfo(os.environ.get("DISPLAY_TZ", "UTC"))
+MAX_CHAT_CHARS = 50000
 
 PROMPT = """Analiza el siguiente chat de audiencia de un TikTok live y responde en JSON con exactamente esta estructura:
 {
@@ -41,170 +42,344 @@ Responde SOLO el JSON, sin markdown ni explicaciones.
 CHAT:
 """
 
-# Max chars of chat to send (Gemini 2.5 Flash handles 1M tokens, but let's be reasonable)
-MAX_CHAT_CHARS = 50000
 
+# ---------------------------------------------------------------------------
+# Rate limit tracker (persisted in SQLite)
+# ---------------------------------------------------------------------------
 
-def init_table(conn: sqlite3.Connection):
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS chat_analysis (
+def _init_rate_log(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_rate_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER NOT NULL UNIQUE REFERENCES sessions(id),
-            topics TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            model TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_chat_analysis_session ON chat_analysis(session_id);
+            provider TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            status TEXT NOT NULL,
+            delay_seconds REAL,
+            error_detail TEXT
+        )
     """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rate_log_provider ON api_rate_log(provider, timestamp)"
+    )
 
 
-def to_local_date(iso_str: str) -> str:
-    try:
-        dt = datetime.fromisoformat(iso_str).astimezone(LOCAL_TZ)
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except (ValueError, TypeError):
-        return iso_str[:16]
+class RateLimiter:
+    """Adaptive per-provider rate limiter. Learns from history in api_rate_log."""
+
+    def __init__(self, provider: str, conn: sqlite3.Connection, initial_delay: float = 2.0):
+        self.provider = provider
+        self.conn = conn
+        self.delay = initial_delay
+        self.min_delay = 1.0
+        self.max_delay = 120.0
+        self.consecutive_ok = 0
+        self.consecutive_429 = 0
+        self._load_history()
+
+    def _load_history(self):
+        recent_429 = self.conn.execute(
+            "SELECT COUNT(*) FROM api_rate_log "
+            "WHERE provider = ? AND status = '429' AND timestamp > datetime('now', '-1 hour')",
+            (self.provider,),
+        ).fetchone()[0]
+        recent_ok = self.conn.execute(
+            "SELECT COUNT(*) FROM api_rate_log "
+            "WHERE provider = ? AND status = 'ok' AND timestamp > datetime('now', '-10 minutes')",
+            (self.provider,),
+        ).fetchone()[0]
+        if recent_429 > 5:
+            self.delay = min(self.delay * 2, self.max_delay)
+        elif recent_ok > 10 and recent_429 == 0:
+            self.delay = max(self.delay * 0.8, self.min_delay)
+
+    def _log(self, status: str, detail: str = ""):
+        self.conn.execute(
+            "INSERT INTO api_rate_log (provider, timestamp, status, delay_seconds, error_detail) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (self.provider, datetime.utcnow().isoformat(), status, self.delay, detail or None),
+        )
+        self.conn.commit()
+
+    def record_ok(self):
+        self.consecutive_ok += 1
+        self.consecutive_429 = 0
+        if self.consecutive_ok >= 3:
+            self.delay = max(self.delay * 0.9, self.min_delay)
+        self._log("ok")
+
+    def record_429(self, detail: str = ""):
+        self.consecutive_429 += 1
+        self.consecutive_ok = 0
+        self.delay = min(self.delay * (1.5 + self.consecutive_429 * 0.5), self.max_delay)
+        self._log("429", detail)
+
+    def record_error(self, detail: str = ""):
+        self._log("error", detail)
+
+    def wait(self):
+        time.sleep(self.delay)
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.consecutive_429 < 3
+
+    def stats_line(self) -> str:
+        row = self.conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='429' THEN 1 ELSE 0 END) "
+            "FROM api_rate_log WHERE provider = ? AND timestamp > datetime('now', '-1 hour')",
+            (self.provider,),
+        ).fetchone()
+        return f"{row[1] or 0} ok / {row[2] or 0} rate-limited (last hour), delay={self.delay:.1f}s"
 
 
-MAX_RETRIES = 3
+# ---------------------------------------------------------------------------
+# Provider callables
+# ---------------------------------------------------------------------------
+
+def _parse_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+    result = json.loads(text)
+    if "topics" not in result or "summary" not in result:
+        raise ValueError("Missing topics or summary in response")
+    return result
 
 
-def analyze_session(client: genai.Client, conn: sqlite3.Connection, session_id: int) -> dict | None:
-    """Send chat chunks to Gemini and parse response. Retries on rate limit."""
+def _call_gemini(chat_text: str) -> tuple[dict, str]:
+    from google import genai
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    resp = client.models.generate_content(model="gemini-2.0-flash-lite", contents=PROMPT + chat_text)
+    return _parse_json(resp.text), "gemini-2.0-flash-lite"
+
+
+def _call_groq(chat_text: str) -> tuple[dict, str]:
+    from groq import Groq
+    client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    resp = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": PROMPT + chat_text}],
+        temperature=0.3,
+    )
+    return _parse_json(resp.choices[0].message.content), "llama-3.3-70b-versatile"
+
+
+# provider name → (callable, env var required, default delay)
+PROVIDERS = {
+    "gemini": (_call_gemini, "GEMINI_API_KEY", 2.0),
+    "groq": (_call_groq, "GROQ_API_KEY", 2.0),
+}
+
+
+def _is_rate_limit(err: Exception) -> bool:
+    s = str(err).lower()
+    return "429" in s or "resource_exhausted" in s or "rate_limit" in s
+
+
+# ---------------------------------------------------------------------------
+# Core: fetch pending, analyze one, save — no batching
+# ---------------------------------------------------------------------------
+
+def _get_pending(conn: sqlite3.Connection, force: bool, session_id: int | None) -> list[tuple]:
+    """Return list of (session_id, username, date) to process.
+
+    Each call queries the DB fresh, so concurrent writers can't cause dupes.
+    """
+    if session_id:
+        base = (
+            "SELECT DISTINCT cc.session_id, s.username, s.date "
+            "FROM chat_chunks cc JOIN sessions s ON cc.session_id = s.id "
+            "WHERE cc.session_id = ?"
+        )
+        rows = conn.execute(base, (session_id,)).fetchall()
+    else:
+        base = (
+            "SELECT DISTINCT cc.session_id, s.username, s.date "
+            "FROM chat_chunks cc JOIN sessions s ON cc.session_id = s.id "
+            "ORDER BY s.date"
+        )
+        rows = conn.execute(base).fetchall()
+
+    if force:
+        return rows
+
+    existing = {r[0] for r in conn.execute("SELECT session_id FROM chat_analysis").fetchall()}
+    return [r for r in rows if r[0] not in existing]
+
+
+def _get_chat_text(conn: sqlite3.Connection, session_id: int) -> str | None:
     chunks = conn.execute(
         "SELECT text FROM chat_chunks WHERE session_id = ? ORDER BY start_time",
         (session_id,),
     ).fetchall()
-
     if not chunks:
         return None
+    text = "\n---\n".join(c[0] for c in chunks)
+    return text[:MAX_CHAT_CHARS] if len(text) > MAX_CHAT_CHARS else text
 
-    chat_text = "\n---\n".join(c[0] for c in chunks)
-    if len(chat_text) > MAX_CHAT_CHARS:
-        chat_text = chat_text[:MAX_CHAT_CHARS]
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=PROMPT + chat_text,
-            )
+def _save_analysis(conn: sqlite3.Connection, session_id: int, result: dict, model: str):
+    conn.execute(
+        "INSERT OR REPLACE INTO chat_analysis (session_id, topics, summary, model) VALUES (?, ?, ?, ?)",
+        (session_id, json.dumps(result["topics"], ensure_ascii=False), result["summary"], model),
+    )
+    conn.commit()
 
-            text = response.text.strip()
-            # Strip markdown code fences if present
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-                if text.endswith("```"):
-                    text = text[:-3].strip()
 
-            return json.loads(text)
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait = 35 * (attempt + 1)
-                print(f"    Rate limited, esperando {wait}s...", flush=True)
-                time.sleep(wait)
-            else:
-                raise
+def _to_local(iso_str: str) -> str:
+    try:
+        return datetime.fromisoformat(iso_str).astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return iso_str[:16]
 
-    raise RuntimeError("Max retries exceeded")
 
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Extract chat topics and summaries via Gemini")
+    parser = argparse.ArgumentParser(description="Chat analysis via LLM (Gemini/Groq)")
     parser.add_argument("--force", action="store_true", help="Re-analyze all sessions")
     parser.add_argument("--session", type=int, help="Analyze only this session")
+    parser.add_argument("--provider", choices=["gemini", "groq", "auto"], default="auto")
     args = parser.parse_args()
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        sys.exit("GEMINI_API_KEY not set in .env")
-
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
-    init_table(conn)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_analysis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL UNIQUE REFERENCES sessions(id),
+            topics TEXT NOT NULL, summary TEXT NOT NULL,
+            model TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_analysis_session ON chat_analysis(session_id)")
+    _init_rate_log(conn)
 
-    # Get sessions with chat chunks
-    if args.session:
-        sessions = conn.execute(
-            "SELECT DISTINCT cc.session_id, s.username, s.date "
-            "FROM chat_chunks cc JOIN sessions s ON cc.session_id = s.id "
-            "WHERE cc.session_id = ?",
-            (args.session,),
-        ).fetchall()
+    if args.force and args.session:
+        conn.execute("DELETE FROM chat_analysis WHERE session_id = ?", (args.session,))
+        conn.commit()
+    elif args.force:
+        conn.execute("DELETE FROM chat_analysis")
+        conn.commit()
+
+    # Resolve available providers
+    if args.provider == "auto":
+        order = [name for name, (_, env, _) in PROVIDERS.items() if os.environ.get(env)]
     else:
-        sessions = conn.execute(
-            "SELECT DISTINCT cc.session_id, s.username, s.date "
-            "FROM chat_chunks cc JOIN sessions s ON cc.session_id = s.id "
-            "ORDER BY s.date",
-        ).fetchall()
+        order = [args.provider]
+    if not order:
+        sys.exit("No API keys configured. Set GEMINI_API_KEY or GROQ_API_KEY in .env")
 
-    if not sessions:
-        print("No hay sesiones con chat chunks. Ejecuta index_chat.py primero.")
+    limiters = {name: RateLimiter(name, conn, PROVIDERS[name][2]) for name in order}
+
+    # Get pending — fresh query each time we need it
+    pending = _get_pending(conn, args.force, args.session)
+    total = len(pending)
+
+    if total == 0:
+        print("Nada pendiente. Usa --force para re-analizar.")
         conn.close()
         return
 
-    # Idempotency
-    if args.force:
-        if args.session:
-            conn.execute("DELETE FROM chat_analysis WHERE session_id = ?", (args.session,))
-        else:
-            conn.execute("DELETE FROM chat_analysis")
-        conn.commit()
-        to_process = sessions
-    else:
-        existing = {
-            r[0] for r in conn.execute("SELECT session_id FROM chat_analysis").fetchall()
-        }
-        to_process = [s for s in sessions if s[0] not in existing]
-        if not to_process:
-            print("Todas las sesiones ya analizadas. Usa --force para re-analizar.")
-            conn.close()
-            return
+    print(f"\n{'='*60}", flush=True)
+    print(f"  Chat analysis — {total} sessions pending", flush=True)
+    print(f"  Providers: {', '.join(order)}", flush=True)
+    for name in order:
+        print(f"    {name}: {limiters[name].stats_line()}", flush=True)
+    print(f"{'='*60}\n", flush=True)
 
-    print(f"Analizando {len(to_process)} sesiones con Gemini 2.5 Flash...", flush=True)
-
-    client = genai.Client(api_key=api_key)
     success = 0
     errors = 0
+    skipped = 0
+    t0 = time.time()
 
-    for idx, (session_id, username, date) in enumerate(to_process):
-        label = f"[{idx + 1}/{len(to_process)}] @{username} {to_local_date(date)}"
-        try:
-            result = analyze_session(client, conn, session_id)
-            if not result:
-                print(f"  {label}: sin chunks, saltando", flush=True)
+    for idx, (session_id, username, date) in enumerate(pending):
+        done = idx + 1
+        pct = done * 100 // total
+        elapsed = time.time() - t0
+        eta = (elapsed / max(success + errors, 1)) * (total - done)
+
+        # Double-check not already analyzed (another process could have done it)
+        already = conn.execute(
+            "SELECT 1 FROM chat_analysis WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if already and not args.force:
+            skipped += 1
+            continue
+
+        chat_text = _get_chat_text(conn, session_id)
+        if not chat_text:
+            skipped += 1
+            print(f"  [{done}/{total}] {pct}% — #{session_id} @{username} — sin texto, saltando", flush=True)
+            continue
+
+        label = f"[{done}/{total}] {pct}% #{session_id} @{username} {_to_local(date)}"
+        analyzed = False
+
+        for provider_name in order:
+            limiter = limiters[provider_name]
+            if not limiter.is_healthy:
                 continue
 
-            topics_json = json.dumps(result["topics"], ensure_ascii=False)
-            summary = result["summary"]
+            try:
+                call_fn = PROVIDERS[provider_name][0]
+                result, model = call_fn(chat_text)
+                limiter.record_ok()
 
-            conn.execute(
-                "INSERT OR REPLACE INTO chat_analysis (session_id, topics, summary, model) "
-                "VALUES (?, ?, ?, ?)",
-                (session_id, topics_json, summary, GEMINI_MODEL),
-            )
-            conn.commit()
-            success += 1
+                _save_analysis(conn, session_id, result, model)
+                success += 1
+                analyzed = True
 
-            topics_preview = ", ".join(result["topics"][:3])
-            print(f"  {label}: {topics_preview}", flush=True)
+                topics_preview = ", ".join(result["topics"][:3])
+                print(f"  {label} ✓ [{provider_name}] {topics_preview} (ETA {eta:.0f}s)", flush=True)
 
-            # Rate limit: ~15 req/min to stay within free tier (20/min limit)
-            time.sleep(4)
+                limiter.wait()
+                break
 
-        except json.JSONDecodeError as e:
-            errors += 1
-            print(f"  {label}: JSON parse error — {e}", flush=True)
-        except Exception as e:
-            errors += 1
-            print(f"  {label}: error — {e}", flush=True)
-            time.sleep(2)
+            except json.JSONDecodeError as e:
+                limiter.record_error(str(e)[:200])
+                errors += 1
+                print(f"  {label} ✗ [{provider_name}] JSON parse error", flush=True)
+                break  # bad output, don't retry with another provider
+
+            except Exception as e:
+                if _is_rate_limit(e):
+                    limiter.record_429(str(e)[:200])
+                    print(f"  {label} ⏸ [{provider_name}] rate limited → delay={limiter.delay:.0f}s", flush=True)
+                    # continue to next provider
+                else:
+                    limiter.record_error(str(e)[:200])
+                    errors += 1
+                    print(f"  {label} ✗ [{provider_name}] {str(e)[:80]}", flush=True)
+                    break
+
+        if not analyzed and not already:
+            # All providers failed — wait for the best one and retry on next iteration
+            healthy = [n for n in order if limiters[n].is_healthy]
+            if not healthy:
+                best = min(order, key=lambda n: limiters[n].delay)
+                wait = limiters[best].delay
+                print(f"  ⏸ All providers exhausted. Waiting {wait:.0f}s for {best}...", flush=True)
+                time.sleep(wait)
+                limiters[best].consecutive_429 = 0
+
+    elapsed_total = time.time() - t0
+    print(f"\n{'='*60}", flush=True)
+    print(f"  Done: {success} analyzed, {errors} errors, {skipped} skipped", flush=True)
+    print(f"  Time: {elapsed_total:.0f}s ({elapsed_total/60:.1f}min)", flush=True)
+    for name in order:
+        print(f"    {name}: {limiters[name].stats_line()}", flush=True)
+    print(f"{'='*60}", flush=True)
 
     conn.close()
-    print(f"\nListo! {success} sesiones analizadas, {errors} errores.")
 
 
 if __name__ == "__main__":

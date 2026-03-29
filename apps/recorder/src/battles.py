@@ -10,6 +10,14 @@ from datetime import datetime, timezone
 import httpx
 import psutil
 
+# Data source bitmask constants
+DS_VIDEO = 1
+DS_CHAT = 2
+DS_GIFTS = 4
+DS_BATTLES = 8
+DS_GUESTS = 16
+DS_VIEWERS = 32
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -99,14 +107,144 @@ def _ensure_pid_column(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
-def create_session(db_path: str, username: str, date_iso: str, ts_path: str, pid: int | None = None) -> int:
+def _ensure_status_columns(conn: sqlite3.Connection) -> None:
+    """Add status, data_sources, data_duration_seconds, ffmpeg_exit_code columns if missing."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    migrations = {
+        "status": "ALTER TABLE sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
+        "data_sources": "ALTER TABLE sessions ADD COLUMN data_sources INTEGER NOT NULL DEFAULT 0",
+        "data_duration_seconds": "ALTER TABLE sessions ADD COLUMN data_duration_seconds REAL",
+        "ffmpeg_exit_code": "ALTER TABLE sessions ADD COLUMN ffmpeg_exit_code INTEGER",
+    }
+    added = False
+    for col, ddl in migrations.items():
+        if col not in cols:
+            conn.execute(ddl)
+            added = True
+    if added:
+        conn.commit()
+        _backfill_session_status(conn)
+
+
+def _backfill_session_status(conn: sqlite3.Connection) -> None:
+    """One-time backfill of status and data_sources for existing sessions."""
+    rows = conn.execute(
+        "SELECT id, date, ts_path, duration_seconds FROM sessions WHERE status = 'complete'"
+    ).fetchall()
+    for sid, date_str, ts_path, dur in rows:
+        sources, data_dur = _compute_data_sources(conn, sid, date_str)
+        has_video = bool(ts_path and ts_path.strip())
+        if has_video:
+            sources |= DS_VIDEO
+
+        if not ts_path or not ts_path.strip():
+            status = "monitor_only"
+        elif has_video and dur and dur > 60:
+            status = "complete"
+        elif sources > 0:
+            status = "partial"
+        else:
+            status = "failed"
+
+        conn.execute(
+            "UPDATE sessions SET status = ?, data_sources = ?, data_duration_seconds = ? WHERE id = ?",
+            (status, sources, data_dur, sid),
+        )
+    conn.commit()
+
+
+def _compute_data_sources(conn: sqlite3.Connection, session_id: int, session_date: str) -> tuple[int, float | None]:
+    """Scan child tables for a session. Return (bitmask, data_duration_seconds)."""
+    sources = 0
+    all_timestamps: list[str] = []
+
+    checks = [
+        (DS_CHAT, "SELECT MIN(timestamp), MAX(timestamp) FROM chat_messages WHERE session_id = ?"),
+        (DS_GIFTS, "SELECT MIN(timestamp), MAX(timestamp) FROM gifts WHERE session_id = ?"),
+        (DS_BATTLES, "SELECT MIN(detected_at), MAX(detected_at) FROM battles WHERE session_id = ?"),
+        (DS_GUESTS, "SELECT MIN(joined_at), MAX(COALESCE(left_at, joined_at)) FROM guests WHERE session_id = ?"),
+        (DS_VIEWERS, "SELECT MIN(joined_at), MAX(joined_at) FROM viewer_joins WHERE session_id = ?"),
+    ]
+
+    for flag, query in checks:
+        try:
+            row = conn.execute(query, (session_id,)).fetchone()
+        except Exception:
+            continue
+        if row and row[0]:
+            sources |= flag
+            all_timestamps.append(row[0])
+            if row[1]:
+                all_timestamps.append(row[1])
+
+    if not all_timestamps:
+        return sources, None
+
+    try:
+        dts = [datetime.fromisoformat(t) for t in all_timestamps]
+        span = (max(dts) - min(dts)).total_seconds()
+        return sources, max(span, 0.0)
+    except (ValueError, TypeError):
+        return sources, None
+
+
+def compute_data_sources(db_path: str, session_id: int, session_date: str) -> tuple[int, float | None]:
+    """Public API: compute data_sources bitmask and data_duration for a session."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        result = _compute_data_sources(conn, session_id, session_date)
+        return result
+    finally:
+        conn.close()
+
+
+def finalize_session(
+    db_path: str,
+    session_id: int,
+    session_date: str,
+    ffmpeg_exit_code: int | None = None,
+    has_video: bool = False,
+) -> str:
+    """Compute data sources, determine status, update session. Returns the status."""
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        _ensure_status_columns(conn)
+        sources, data_dur = _compute_data_sources(conn, session_id, session_date)
+        if has_video:
+            sources |= DS_VIDEO
+
+        if has_video and ffmpeg_exit_code == 0:
+            status = "complete"
+        elif has_video:
+            status = "complete"  # video exists even if ffmpeg exited weird
+        elif sources > 0:
+            status = "partial"
+        else:
+            status = "failed"
+
+        conn.execute(
+            """UPDATE sessions SET status = ?, data_sources = ?,
+               data_duration_seconds = ?, ffmpeg_exit_code = ? WHERE id = ?""",
+            (status, sources, data_dur, ffmpeg_exit_code, session_id),
+        )
+        conn.commit()
+        return status
+    finally:
+        conn.close()
+
+
+def create_session(
+    db_path: str, username: str, date_iso: str, ts_path: str,
+    pid: int | None = None, status: str = "recording",
+) -> int:
     """Insert a session row when recording starts, return session_id."""
     conn = sqlite3.connect(db_path, timeout=10)
     try:
         _ensure_pid_column(conn)
+        _ensure_status_columns(conn)
         cur = conn.execute(
-            "INSERT INTO sessions (username, date, ts_path, pid) VALUES (?, ?, ?, ?)",
-            (username, date_iso, ts_path, pid),
+            "INSERT INTO sessions (username, date, ts_path, pid, status) VALUES (?, ?, ?, ?, ?)",
+            (username, date_iso, ts_path, pid, status),
         )
         conn.commit()
         return cur.lastrowid
@@ -303,8 +441,39 @@ def save_viewer_joins(db_path: str, joins: list[dict]) -> None:
         conn.close()
 
 
+def _ensure_gift_catalog(conn: sqlite3.Connection) -> None:
+    """Create gift_catalog table and gift_id column if missing."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS gift_catalog (
+            gift_id INTEGER PRIMARY KEY,
+            gift_name TEXT NOT NULL,
+            diamond_count INTEGER NOT NULL,
+            coin_cost INTEGER,
+            first_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(gift_name)
+        )
+    """)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(gifts)")}
+    if "gift_id" not in cols:
+        conn.execute("ALTER TABLE gifts ADD COLUMN gift_id INTEGER")
+        conn.commit()
+
+
+def _update_gift_catalog(conn: sqlite3.Connection, gifts: list[dict]) -> None:
+    """Auto-populate gift_catalog from incoming gifts with diamond values."""
+    for g in gifts:
+        gift_id = g.get("gift_id")
+        gift_name = g.get("gift_name")
+        diamonds = g.get("diamond_count", 0)
+        if gift_id and gift_name and diamonds > 0:
+            conn.execute(
+                "INSERT OR IGNORE INTO gift_catalog (gift_id, gift_name, diamond_count) VALUES (?, ?, ?)",
+                (gift_id, gift_name, diamonds),
+            )
+
+
 def save_gifts(db_path: str, gifts: list[dict]) -> None:
-    """Insert a batch of gift/envelope events."""
+    """Insert a batch of gift/envelope events and update gift catalog."""
     if not gifts:
         return
     conn = sqlite3.connect(db_path, timeout=10)
@@ -324,14 +493,22 @@ def save_gifts(db_path: str, gifts: list[dict]) -> None:
                 timestamp TEXT NOT NULL
             )"""
         )
+        _ensure_gift_catalog(conn)
+
+        # Normalize: add gift_id default for older callers that don't provide it
+        for g in gifts:
+            g.setdefault("gift_id", None)
+
         conn.executemany(
             """INSERT INTO gifts
                (session_id, battle_id, room_username, user_id, username,
-                gift_name, diamond_count, repeat_count, event_type, timestamp)
+                gift_name, gift_id, diamond_count, repeat_count, event_type, timestamp)
                VALUES (:session_id, :battle_id, :room_username, :user_id, :username,
-                :gift_name, :diamond_count, :repeat_count, :event_type, :timestamp)""",
+                :gift_name, :gift_id, :diamond_count, :repeat_count, :event_type, :timestamp)""",
             gifts,
         )
+
+        _update_gift_catalog(conn, gifts)
         conn.commit()
     finally:
         conn.close()
@@ -373,6 +550,7 @@ def close_orphaned_sessions(db_path: str) -> tuple[list[dict], list[dict]]:
     conn = sqlite3.connect(db_path, timeout=10)
     try:
         _ensure_pid_column(conn)
+        _ensure_status_columns(conn)
         orphans = conn.execute(
             "SELECT id, username, date, ts_path, pid FROM sessions WHERE duration_seconds IS NULL"
         ).fetchall()
@@ -390,33 +568,29 @@ def close_orphaned_sessions(db_path: str) -> tuple[list[dict], list[dict]]:
                 })
                 continue
 
-            # Otherwise close the session with computed duration
-            last_activity = None
-            for query in [
-                "SELECT MAX(timestamp) FROM chat_messages WHERE session_id = ?",
-                "SELECT MAX(detected_at) FROM battles WHERE session_id = ?",
-                "SELECT MAX(COALESCE(left_at, joined_at)) FROM guests WHERE session_id = ?",
-            ]:
-                row = conn.execute(query, (sid,)).fetchone()
-                ts = row[0] if row else None
-                if ts and (last_activity is None or ts > last_activity):
-                    last_activity = ts
+            # Compute data sources and duration from child tables
+            sources, data_dur = _compute_data_sources(conn, sid, date_str)
+            duration = data_dur if data_dur and data_dur > 0 else 0.0
 
-            if last_activity:
-                try:
-                    t_start = datetime.fromisoformat(date_str)
-                    t_end = datetime.fromisoformat(last_activity)
-                    duration = (t_end - t_start).total_seconds()
-                    if duration < 0:
-                        duration = 0.0
-                except (ValueError, TypeError):
-                    duration = 0.0
+            has_video = bool(ts_path and ts_path.strip())
+            if has_video:
+                from pathlib import Path
+                video_path = Path(ts_path)
+                has_video = video_path.exists() and video_path.stat().st_size > 0
+            if has_video:
+                sources |= DS_VIDEO
+
+            if has_video:
+                status = "complete"
+            elif sources > 0:
+                status = "partial"
             else:
-                duration = 0.0
+                status = "failed"
 
             conn.execute(
-                "UPDATE sessions SET duration_seconds = ? WHERE id = ?",
-                (duration, sid),
+                """UPDATE sessions SET duration_seconds = ?, status = ?,
+                   data_sources = ?, data_duration_seconds = ? WHERE id = ?""",
+                (duration, status, sources, data_dur, sid),
             )
             closed.append({"id": sid, "username": username, "duration": duration})
 

@@ -125,19 +125,52 @@ export interface SessionRow {
   username: string;
   date: string;
   duration_seconds: number | null;
+  status: string;
+  data_sources: number;
+  data_duration_seconds: number | null;
   indexed_at: string;
   chunk_count: number;
   clip_count: number;
 }
 
-export function getSessions(author?: string): SessionRow[] {
+export const DS_VIDEO = 1;
+export const DS_CHAT = 2;
+export const DS_GIFTS = 4;
+export const DS_BATTLES = 8;
+export const DS_GUESTS = 16;
+export const DS_VIEWERS = 32;
+
+export function getDataSourceLabels(bitmask: number): string[] {
+  const labels: string[] = [];
+  if (bitmask & DS_VIDEO) labels.push("video");
+  if (bitmask & DS_CHAT) labels.push("chat");
+  if (bitmask & DS_GIFTS) labels.push("gifts");
+  if (bitmask & DS_BATTLES) labels.push("battles");
+  if (bitmask & DS_GUESTS) labels.push("guests");
+  if (bitmask & DS_VIEWERS) labels.push("viewers");
+  return labels;
+}
+
+export function getSessions(author?: string, status?: string): SessionRow[] {
   const db = getDb();
   try {
-    const where = author ? "WHERE s.username = ?" : "";
-    const params = author ? [author] : [];
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (author) {
+      conditions.push("s.username = ?");
+      params.push(author);
+    }
+    if (status) {
+      conditions.push("s.status = ?");
+      params.push(status);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const sql = `
-      SELECT s.id, s.username, s.date, s.duration_seconds, s.indexed_at,
+      SELECT s.id, s.username, s.date, s.duration_seconds, s.status,
+        s.data_sources, s.data_duration_seconds, s.indexed_at,
         (SELECT COUNT(*) FROM chunks ch WHERE ch.session_id = s.id) as chunk_count,
         (SELECT COUNT(*) FROM clips c WHERE c.session_id = s.id) as clip_count
       FROM sessions s
@@ -166,6 +199,10 @@ export interface SessionDetail {
   username: string;
   date: string;
   duration_seconds: number | null;
+  status: string;
+  data_sources: number;
+  data_duration_seconds: number | null;
+  ffmpeg_exit_code: number | null;
   ts_path: string | null;
   srt_path: string | null;
   audio_path: string | null;
@@ -745,6 +782,118 @@ export function getTopDonors(username: string, limit = 10): DonorRankingRow[] {
          LIMIT ?`,
       )
       .all(username, username, limit) as DonorRankingRow[];
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export interface GlobalDonorRow {
+  user_id: number;
+  username: string;
+  total_diamonds: number;
+  total_coins: number;
+  gift_count: number;
+  total_repeats: number;
+  sessions: number;
+  streamers: number;
+  top_gift: string | null;
+  top_receiver: string | null;
+  first_gift: string | null;
+  last_gift: string | null;
+}
+
+export function getGlobalDonors(limit = 50): GlobalDonorRow[] {
+  const db = getDb();
+  try {
+    return db
+      .prepare(
+        `SELECT g.user_id, g.username,
+                SUM(g.diamond_count * g.repeat_count) as total_diamonds,
+                SUM(gc.coin_cost * g.repeat_count) as total_coins,
+                COUNT(*) as gift_count,
+                SUM(g.repeat_count) as total_repeats,
+                COUNT(DISTINCT g.session_id) as sessions,
+                COUNT(DISTINCT g.room_username) as streamers,
+                (SELECT g2.gift_name FROM gifts g2 WHERE g2.user_id = g.user_id AND g2.event_type = 'gift'
+                 ORDER BY g2.diamond_count * g2.repeat_count DESC LIMIT 1) as top_gift,
+                (SELECT g3.room_username FROM gifts g3 WHERE g3.user_id = g.user_id AND g3.event_type = 'gift'
+                 GROUP BY g3.room_username ORDER BY SUM(g3.diamond_count * g3.repeat_count) DESC LIMIT 1) as top_receiver,
+                MIN(g.timestamp) as first_gift,
+                MAX(g.timestamp) as last_gift
+         FROM gifts g
+         LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
+         WHERE g.event_type = 'gift'
+         GROUP BY g.user_id
+         ORDER BY total_diamonds DESC
+         LIMIT ?`,
+      )
+      .all(limit) as GlobalDonorRow[];
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export interface DonorGiftBreakdown {
+  gift_name: string;
+  diamond_count: number;
+  coin_cost: number | null;
+  total_sent: number;
+  total_diamonds: number;
+}
+
+export function getDonorGifts(userId: number): DonorGiftBreakdown[] {
+  const db = getDb();
+  try {
+    return db
+      .prepare(
+        `SELECT g.gift_name, g.diamond_count,
+                gc.coin_cost,
+                SUM(g.repeat_count) as total_sent,
+                SUM(g.diamond_count * g.repeat_count) as total_diamonds
+         FROM gifts g
+         LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
+         WHERE g.user_id = ? AND g.event_type = 'gift'
+         GROUP BY g.gift_name
+         ORDER BY total_diamonds DESC`,
+      )
+      .all(userId) as DonorGiftBreakdown[];
+  } catch {
+    return [];
+  } finally {
+    db.close();
+  }
+}
+
+export interface GiftCatalogRow {
+  gift_name: string;
+  diamond_count: number;
+  coin_cost: number | null;
+  total_sent: number;
+  total_diamonds: number;
+  unique_senders: number;
+}
+
+export function getGiftCatalogStats(): GiftCatalogRow[] {
+  const db = getDb();
+  try {
+    return db
+      .prepare(
+        `SELECT g.gift_name, g.diamond_count,
+                gc.coin_cost,
+                SUM(g.repeat_count) as total_sent,
+                SUM(g.diamond_count * g.repeat_count) as total_diamonds,
+                COUNT(DISTINCT g.user_id) as unique_senders
+         FROM gifts g
+         LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
+         WHERE g.event_type = 'gift'
+         GROUP BY g.gift_name
+         ORDER BY total_diamonds DESC`,
+      )
+      .all() as GiftCatalogRow[];
   } catch {
     return [];
   } finally {

@@ -109,11 +109,12 @@ class TreasureSpy:
         @self.client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
             try:
-                diamonds = getattr(event, "diamond_count", 0) or 0
+                gift_obj = getattr(event, "gift", None)
+                diamonds = getattr(gift_obj, "diamond_count", 0) or 0 if gift_obj else 0
+                gift_id = getattr(gift_obj, "id", None) if gift_obj else None
+                gift_name = getattr(gift_obj, "name", "gift") if gift_obj else "gift"
                 user = getattr(event, "user", None)
                 nickname = getattr(user, "nickname", "???") if user else "???"
-                gift_obj = getattr(event, "gift", None)
-                gift_name = getattr(gift_obj, "name", "gift") if gift_obj else "gift"
                 if diamonds >= GIFT_DIAMOND_THRESHOLD:
                     log.info(
                         "💎 GIFT @%s — %s sent %s (%d diamonds)",
@@ -129,6 +130,7 @@ class TreasureSpy:
                         "user_id": user_id,
                         "username": username,
                         "gift_name": gift_name,
+                        "gift_id": gift_id,
                         "diamond_count": diamonds,
                         "repeat_count": getattr(event, "repeat_count", 1) or 1,
                         "event_type": "gift",

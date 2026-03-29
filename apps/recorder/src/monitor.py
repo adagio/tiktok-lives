@@ -22,6 +22,7 @@ from battles import (
     close_orphaned_guests,
     close_orphaned_sessions,
     create_session,
+    finalize_session,
     get_battle_info,
     get_host_user_id,
     get_room_id,
@@ -42,6 +43,9 @@ HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / "monitor.heartbeat"
 LOCK_PATH = Path(__file__).resolve().parent.parent / "monitor.lock"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DB_PATH = str(REPO_ROOT / "clips.db")
+BACKUP_DIR = REPO_ROOT / "backups"
+BACKUP_INTERVAL = 3600  # seconds (1 hour)
+BACKUP_KEEP = 4  # number of recent backups to keep
 
 # --- Logging setup ---
 
@@ -85,11 +89,21 @@ class ActiveSession:
 # --- Monitor ---
 
 
+MIN_GOOD_DURATION = 120  # seconds — recordings shorter than this count as failures
+CIRCUIT_BREAKER_WINDOW = 300  # seconds — look at failures within this window
+CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive short failures before backoff
+CIRCUIT_BREAKER_BASE_DELAY = 60  # seconds — initial backoff (1 min)
+CIRCUIT_BREAKER_MAX_DELAY = 300  # seconds — max backoff (5 min)
+
+
 class Monitor:
     def __init__(self):
         self.active: dict[str, ActiveSession] = {}
         self.resolved_users: dict[int, str] = {}
         self._shutdown = False
+        # Circuit breaker: track recent recording failures per user
+        self._fail_times: dict[str, list[float]] = {}  # username -> list of failure timestamps
+        self._backoff_until: dict[str, float] = {}  # username -> timestamp when backoff expires
 
     async def _heartbeat_loop(self):
         """Write timestamp to heartbeat file every 30s for watchdog hang detection."""
@@ -124,6 +138,56 @@ class Monitor:
             log.error("Failed to load watchlist: %s", e)
             return 90, []
 
+    def _record_failure(self, username: str):
+        """Record a recording failure and activate backoff if threshold reached."""
+        now = time.time()
+        times = self._fail_times.setdefault(username, [])
+        times.append(now)
+        # Keep only failures within the window
+        cutoff = now - CIRCUIT_BREAKER_WINDOW
+        times[:] = [t for t in times if t >= cutoff]
+
+        if len(times) >= CIRCUIT_BREAKER_THRESHOLD:
+            # Fibonacci backoff: 1, 1, 2, 3, 5, 8, 13... × base_delay
+            streak = len(times) - CIRCUIT_BREAKER_THRESHOLD
+            a, b = 1, 1
+            for _ in range(streak):
+                a, b = b, a + b
+            delay = min(a * CIRCUIT_BREAKER_BASE_DELAY, CIRCUIT_BREAKER_MAX_DELAY)
+            self._backoff_until[username] = now + delay
+            log.warning(
+                "⏸️  Circuit breaker for @%s: %d failures in %ds, backing off %.0fmin",
+                username, len(times), CIRCUIT_BREAKER_WINDOW, delay / 60,
+            )
+
+    def _clear_failures(self, username: str):
+        """Reset failure tracking after a successful recording."""
+        self._fail_times.pop(username, None)
+        self._backoff_until.pop(username, None)
+
+    def _is_backed_off(self, username: str) -> bool:
+        """Check if user is in backoff period."""
+        until = self._backoff_until.get(username)
+        if until is None:
+            return False
+        if time.time() >= until:
+            # Backoff expired — allow one retry but keep fail history
+            del self._backoff_until[username]
+            log.info("⏸️  Backoff expired for @%s, will retry", username)
+            return False
+        return True
+
+    def _cleanup_empty_file(self, path: Path | None):
+        """Remove 0-byte .ts files left by crashed ffmpeg."""
+        if path is None:
+            return
+        try:
+            if path.exists() and path.stat().st_size == 0:
+                path.unlink()
+                log.info("🗑️  Removed empty file %s", path)
+        except Exception:
+            log.debug("Failed to clean up %s", path, exc_info=True)
+
     def _reap_finished(self):
         """Remove entries for ffmpeg processes that have exited."""
         finished = []
@@ -143,6 +207,28 @@ class Monitor:
                         log.info("Updated session %d duration: %.0fs", sess.session_id, elapsed)
                     except Exception:
                         log.warning("Failed to update session duration for @%s", username, exc_info=True)
+
+                    # Finalize session: compute data sources and set status
+                    try:
+                        has_video = bool(
+                            sess.path and sess.path.exists() and sess.path.stat().st_size > 0
+                        )
+                        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                        status = finalize_session(
+                            DB_PATH, sess.session_id, date_str,
+                            ffmpeg_exit_code=ret, has_video=has_video,
+                        )
+                        log.info("Session %d finalized: status=%s", sess.session_id, status)
+                    except Exception:
+                        log.warning("Failed to finalize session for @%s", username, exc_info=True)
+
+                # Track failures vs successes for circuit breaker
+                if ret != 0 and elapsed < MIN_GOOD_DURATION:
+                    self._record_failure(username)
+                    self._cleanup_empty_file(sess.path)
+                else:
+                    self._clear_failures(username)
+
                 # Cancel spy tasks
                 if sess.spy_task and not sess.spy_task.done():
                     sess.spy_task.cancel()
@@ -164,7 +250,7 @@ class Monitor:
         session_id = None
         try:
             date_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-            session_id = create_session(DB_PATH, username, date_iso, str(path), pid=proc.pid)
+            session_id = create_session(DB_PATH, username, date_iso, str(path), pid=proc.pid, status="recording")
             log.info("Created session %d for @%s (pid=%d)", session_id, username, proc.pid)
         except Exception:
             log.warning("Failed to create session for @%s", username, exc_info=True)
@@ -187,7 +273,7 @@ class Monitor:
         session_id = None
         try:
             date_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-            session_id = create_session(DB_PATH, username, date_iso, "", pid=0)
+            session_id = create_session(DB_PATH, username, date_iso, "", pid=0, status="monitor_only")
             log.info("Created monitor-only session %d for @%s", session_id, username)
         except Exception:
             log.warning("Failed to create session for @%s", username, exc_info=True)
@@ -425,25 +511,58 @@ class Monitor:
         if spy_tasks:
             await asyncio.gather(*spy_tasks, return_exceptions=True)
 
-        # Wait for ffmpeg processes
+        # Wait for ffmpeg processes and finalize sessions
         for username, sess in self.active.items():
-            if not sess.process:
-                continue
-            try:
-                sess.process.wait(timeout=10)
-            except Exception:
-                sess.process.kill()
+            ret = None
+            if sess.process:
+                try:
+                    sess.process.wait(timeout=10)
+                    ret = sess.process.poll()
+                except Exception:
+                    sess.process.kill()
+                    ret = -1
 
-            # Update duration
             elapsed = time.time() - sess.started_at
             if sess.session_id is not None:
                 try:
                     update_session_duration(DB_PATH, sess.session_id, elapsed)
                 except Exception:
                     pass
+                try:
+                    has_video = bool(
+                        sess.path and sess.path.exists() and sess.path.stat().st_size > 0
+                    )
+                    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                    finalize_session(
+                        DB_PATH, sess.session_id, date_str,
+                        ffmpeg_exit_code=ret, has_video=has_video,
+                    )
+                except Exception:
+                    pass
 
         self.active.clear()
         log.info("Monitor stopped.")
+
+    async def _backup_db_loop(self):
+        """Backup clips.db every hour, keeping only the last N copies."""
+        import shutil
+
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        while not self._shutdown:
+            try:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                dest = BACKUP_DIR / f"clips_{ts}.db"
+                await asyncio.to_thread(shutil.copy2, DB_PATH, str(dest))
+                log.info("💾 DB backup → %s", dest.name)
+
+                # Rotate: keep only the last N backups
+                backups = sorted(BACKUP_DIR.glob("clips_*.db"))
+                for old in backups[:-BACKUP_KEEP]:
+                    old.unlink()
+                    log.info("💾 Removed old backup %s", old.name)
+            except Exception:
+                log.warning("DB backup failed", exc_info=True)
+            await asyncio.sleep(BACKUP_INTERVAL)
 
     async def _profile_check_loop(self):
         """Periodically check all watchlist users for new video uploads."""
@@ -495,6 +614,7 @@ class Monitor:
         # Launch background tasks
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         profile_task = asyncio.create_task(self._profile_check_loop())
+        backup_task = asyncio.create_task(self._backup_db_loop())
 
         while not self._shutdown:
             interval, users = self._load_watchlist()
@@ -530,6 +650,11 @@ class Monitor:
                                     update_session_duration(DB_PATH, sess.session_id, elapsed)
                                 except Exception:
                                     log.warning("Failed to update session duration for @%s", username, exc_info=True)
+                                try:
+                                    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                                    finalize_session(DB_PATH, sess.session_id, date_str, has_video=False)
+                                except Exception:
+                                    log.warning("Failed to finalize session for @%s", username, exc_info=True)
                             if sess.spy_task and not sess.spy_task.done():
                                 sess.spy_task.cancel()
                             if sess.chat_task and not sess.chat_task.done():
@@ -559,6 +684,14 @@ class Monitor:
                         if sess.chat_spy:
                             sess.chat_spy.battle_id = sess.last_battle_id
                         await self._launch_opponent_chat_spy(sess, battle_result, sess.last_battle_id)
+                    continue
+
+                # Circuit breaker: skip if in backoff
+                if self._is_backed_off(username):
+                    remaining = self._backoff_until[username] - time.time()
+                    log.debug("Skipping @%s (backed off, %.0fs remaining)", username, remaining)
+                    if i < len(users) - 1 and not self._shutdown:
+                        await asyncio.sleep(delay_between)
                     continue
 
                 log.info("Checking @%s ...", username)
@@ -595,8 +728,9 @@ class Monitor:
 
         heartbeat_task.cancel()
         profile_task.cancel()
+        backup_task.cancel()
         try:
-            await asyncio.gather(heartbeat_task, profile_task, return_exceptions=True)
+            await asyncio.gather(heartbeat_task, profile_task, backup_task, return_exceptions=True)
         except (asyncio.CancelledError, Exception):
             pass
 

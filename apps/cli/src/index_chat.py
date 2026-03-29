@@ -1,7 +1,12 @@
 """Vectorize chat messages for semantic search and topic analysis.
 
-Groups non-battle chat messages into 2-minute time windows, embeds them
-with multilingual-e5-large, and computes topic scores.
+Groups chat messages into 2-minute time windows, embeds them with
+multilingual-e5-large, and computes topic scores.
+
+Three chat contexts, stored separately:
+  - organic:         non-battle chat from the host's room
+  - battle_host:     host's room chat during a battle
+  - battle_opponent: opponent's room chat during a battle
 
 Usage:
     cd apps/cli && uv run src/index_chat.py [--force] [--session ID]
@@ -61,63 +66,96 @@ def init_tables(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_cct_chunk ON chat_chunk_topics(chat_chunk_id);
     """)
+    # Add context column if missing
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(chat_chunks)")}
+    if "context" not in cols:
+        conn.execute("ALTER TABLE chat_chunks ADD COLUMN context TEXT NOT NULL DEFAULT 'organic'")
+        conn.commit()
+    # Drop the old unique constraint and create a new one that includes context
+    # (can't drop constraints in SQLite, so we create a new unique index instead)
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_chunks_unique ON chat_chunks(session_id, start_time, context)")
+    except Exception:
+        pass
 
 
 def embed_to_blob(vec: np.ndarray) -> bytes:
-    """Pack float32 numpy array to bytes."""
     return struct.pack(f"{len(vec)}f", *vec.tolist())
 
 
 def parse_embedding(blob: bytes) -> np.ndarray:
-    """Unpack float32 BLOB into numpy array."""
     n = len(blob) // 4
     return np.array(struct.unpack(f"{n}f", blob), dtype=np.float32)
 
 
 def _window_key(ts_str: str) -> str:
-    """Floor an ISO timestamp to the nearest WINDOW_MINUTES boundary."""
     dt = datetime.fromisoformat(ts_str)
     floored_minute = (dt.minute // WINDOW_MINUTES) * WINDOW_MINUTES
     floored = dt.replace(minute=floored_minute, second=0, microsecond=0)
     return floored.isoformat()
 
 
+def _messages_to_chunks(messages: list[tuple[str, str, str]], session_id: int, context: str) -> list[dict]:
+    """Group messages into windowed chunks. Each message is (username, text, timestamp)."""
+    if not messages:
+        return []
+
+    windows: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    for username, text, timestamp in messages:
+        key = _window_key(timestamp)
+        windows[key].append((username, text, timestamp))
+
+    chunks = []
+    for window_start, msgs in sorted(windows.items()):
+        if len(msgs) < MIN_MESSAGES:
+            continue
+        for i in range(0, len(msgs), MAX_MESSAGES_PER_CHUNK):
+            batch = msgs[i : i + MAX_MESSAGES_PER_CHUNK]
+            text = "\n".join(f"[{u}]: {t}" for u, t, _ in batch)
+            chunks.append({
+                "session_id": session_id,
+                "start_time": batch[0][2],
+                "end_time": batch[-1][2],
+                "message_count": len(batch),
+                "text": text,
+                "context": context,
+            })
+    return chunks
+
+
 def group_chat_chunks(conn: sqlite3.Connection, session_id: int) -> list[dict]:
-    """Group non-battle chat messages into 2-minute windows."""
-    rows = conn.execute(
+    """Group all chat messages into chunks, separated by context."""
+    # Get the host username for this session
+    host = conn.execute("SELECT username FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    host_username = host[0] if host else ""
+
+    all_chunks = []
+
+    # 1. Organic chat (no battle)
+    organic = conn.execute(
         "SELECT username, text, timestamp FROM chat_messages "
         "WHERE session_id = ? AND battle_id IS NULL "
         "ORDER BY timestamp",
         (session_id,),
     ).fetchall()
+    all_chunks.extend(_messages_to_chunks(organic, session_id, "organic"))
 
-    if not rows:
-        return []
+    # 2. Battle chat — split by room (host vs opponent)
+    battle_msgs = conn.execute(
+        "SELECT room_username, username, text, timestamp FROM chat_messages "
+        "WHERE session_id = ? AND battle_id IS NOT NULL "
+        "ORDER BY timestamp",
+        (session_id,),
+    ).fetchall()
 
-    # Group by time window
-    windows: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
-    for username, text, timestamp in rows:
-        key = _window_key(timestamp)
-        windows[key].append((username, text, timestamp))
+    if battle_msgs:
+        host_battle = [(u, t, ts) for room, u, t, ts in battle_msgs if room == host_username]
+        opponent_battle = [(u, t, ts) for room, u, t, ts in battle_msgs if room != host_username]
 
-    chunks = []
-    for window_start, messages in sorted(windows.items()):
-        if len(messages) < MIN_MESSAGES:
-            continue
+        all_chunks.extend(_messages_to_chunks(host_battle, session_id, "battle_host"))
+        all_chunks.extend(_messages_to_chunks(opponent_battle, session_id, "battle_opponent"))
 
-        # Sub-chunk if too many messages
-        for i in range(0, len(messages), MAX_MESSAGES_PER_CHUNK):
-            batch = messages[i : i + MAX_MESSAGES_PER_CHUNK]
-            text = "\n".join(f"[{u}]: {t}" for u, t, _ in batch)
-            chunks.append({
-                "session_id": session_id,
-                "start_time": batch[0][2],   # first message timestamp
-                "end_time": batch[-1][2],     # last message timestamp
-                "message_count": len(batch),
-                "text": text,
-            })
-
-    return chunks
+    return all_chunks
 
 
 def main():
@@ -143,24 +181,22 @@ def main():
     else:
         print("Warning: topic_embeddings.json not found, skipping topic scores", flush=True)
 
-    # Connect to DB
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("PRAGMA journal_mode=WAL")
     init_tables(conn)
 
-    # Get sessions with chat messages
+    # Get ALL sessions with any chat messages (organic or battle)
     if args.session:
         sessions = conn.execute(
             "SELECT DISTINCT s.id, s.username, s.date FROM sessions s "
             "JOIN chat_messages cm ON cm.session_id = s.id "
-            "WHERE s.id = ? AND cm.battle_id IS NULL",
+            "WHERE s.id = ?",
             (args.session,),
         ).fetchall()
     else:
         sessions = conn.execute(
             "SELECT DISTINCT s.id, s.username, s.date FROM sessions s "
             "JOIN chat_messages cm ON cm.session_id = s.id "
-            "WHERE cm.battle_id IS NULL "
             "ORDER BY s.date",
         ).fetchall()
 
@@ -185,7 +221,7 @@ def main():
             conn.execute("DELETE FROM chat_chunks")
         conn.commit()
         sessions_to_process = sessions
-        print("Force mode: re-processing", flush=True)
+        print("Force mode: re-processing all", flush=True)
     else:
         existing = {
             row[0]
@@ -209,6 +245,7 @@ def main():
 
     total_chunks = 0
     total_topics = 0
+    context_counts = defaultdict(int)
 
     t0 = time.time()
     for idx, (session_id, username, date) in enumerate(sessions_to_process):
@@ -216,7 +253,8 @@ def main():
 
         if not chunks:
             print(
-                f"  [{idx + 1}/{len(sessions_to_process)}] {username}/{date}: no chunks (< {MIN_MESSAGES} msgs per window)",
+                f"  [{idx + 1}/{len(sessions_to_process)}] {username}/{date}: "
+                f"no chunks (< {MIN_MESSAGES} msgs per window)",
                 flush=True,
             )
             continue
@@ -229,8 +267,9 @@ def main():
         chunk_ids = []
         for i, chunk in enumerate(chunks):
             cur = conn.execute(
-                "INSERT INTO chat_chunks (session_id, start_time, end_time, message_count, text, embedding, embedding_model) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO chat_chunks "
+                "(session_id, start_time, end_time, message_count, text, embedding, embedding_model, context) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     chunk["session_id"],
                     chunk["start_time"],
@@ -239,9 +278,11 @@ def main():
                     chunk["text"],
                     embed_to_blob(embeddings[i]),
                     EMBEDDING_MODEL,
+                    chunk["context"],
                 ),
             )
             chunk_ids.append(cur.lastrowid)
+            context_counts[chunk["context"]] += 1
 
         # Compute topic scores
         if topic_embeddings and chunk_ids:
@@ -249,19 +290,24 @@ def main():
             for tid in topic_ids:
                 scores = chunk_emb_matrix @ topic_embeddings[tid]
                 for j, score in enumerate(scores):
-                    conn.execute(
-                        "INSERT OR REPLACE INTO chat_chunk_topics (chat_chunk_id, topic, score) "
-                        "VALUES (?, ?, ?)",
-                        (chunk_ids[j], tid, float(score)),
-                    )
+                    if chunk_ids[j]:  # skip if INSERT OR IGNORE didn't insert
+                        conn.execute(
+                            "INSERT OR REPLACE INTO chat_chunk_topics (chat_chunk_id, topic, score) "
+                            "VALUES (?, ?, ?)",
+                            (chunk_ids[j], tid, float(score)),
+                        )
             total_topics += len(chunk_ids) * len(topic_ids)
 
         conn.commit()
         total_chunks += len(chunks)
+        by_ctx = defaultdict(int)
+        for c in chunks:
+            by_ctx[c["context"]] += 1
+        ctx_str = " + ".join(f"{v} {k}" for k, v in sorted(by_ctx.items()))
         msg_count = sum(c["message_count"] for c in chunks)
         print(
             f"  [{idx + 1}/{len(sessions_to_process)}] {username}/{date}: "
-            f"{len(chunks)} chunks ({msg_count} messages)",
+            f"{len(chunks)} chunks ({msg_count} msgs) — {ctx_str}",
             flush=True,
         )
 
@@ -270,6 +316,8 @@ def main():
 
     print(f"\nDone in {elapsed:.1f}s! Processed {len(sessions_to_process)} sessions.")
     print(f"  chat_chunks: {total_chunks} rows")
+    for ctx, count in sorted(context_counts.items()):
+        print(f"    {ctx}: {count}")
     if topic_ids:
         print(f"  chat_chunk_topics: {total_topics} rows")
 
