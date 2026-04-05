@@ -40,13 +40,14 @@ def build_prompt(username: str, duration_min: int | None, transcript: str) -> st
 Dado el siguiente transcrito de un live de "@{username}"{duration_note}, genera un resumen breve y claro de lo que dijo el autor.
 
 Reglas:
-- Maximo 5 parrafos cortos (2 lineas cada uno)
-- Cada parrafo cubre un tema o momento distinto de la sesion
+- Minimo 5 parrafos, cada uno de 3-4 lineas
+- Cada parrafo cubre un tema, momento o segmento distinto de la sesion
 - Usa un tono casual y directo, como notas personales
 - No uses bullets, listas ni encabezados — solo parrafos separados por linea vacia
-- Si la sesion es corta (<15 min), 2-3 parrafos bastan
+- Si la sesion es corta (<15 min), 3-4 parrafos bastan
 - Captura el tono emocional: si fue divertida, emotiva, relajada, etc.
 - Se especifico — menciona nombres, temas y detalles concretos
+- Incluye momentos clave, frases memorables o situaciones que destacaron
 
 Transcrito:
 {truncated}"""
@@ -71,7 +72,8 @@ def summarize(client: genai.Client, prompt: str) -> str | None:
                 contents=prompt,
                 config=genai.types.GenerateContentConfig(
                     temperature=0.3,
-                    max_output_tokens=600,
+                    max_output_tokens=8192,
+                    thinking_config=genai.types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             return response.text.strip() if response.text else None
