@@ -87,9 +87,9 @@ const { title } = Astro.props;
     <script is:inline>
       (function() {
         var fmts = {
-          date: { day: 'numeric', month: 'numeric', year: 'numeric' },
+          date: { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' },
           time: { hour: '2-digit', minute: '2-digit' },
-          datetime: { day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }
+          datetime: { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }
         };
         document.querySelectorAll('[data-utc]').forEach(function(el) {
           var raw = el.getAttribute('data-utc');

@@ -558,6 +558,86 @@ export async function isBattleActive(battleId: number): Promise<boolean> {
   }
 }
 
+// --- Battle gifts ---
+
+export interface BattleGiftSummary {
+  room_username: string;
+  total_diamonds: number;
+  total_gifts: number;
+  unique_donors: number;
+}
+
+export interface BattleGiftDonor {
+  room_username: string;
+  user_id: number;
+  username: string;
+  total_diamonds: number;
+  gift_count: number;
+  top_gift: string | null;
+}
+
+export interface BattleGiftItem {
+  room_username: string;
+  gift_name: string;
+  diamond_count: number;
+  total_sent: number;
+  total_diamonds: number;
+}
+
+export async function getBattleGiftSummary(battleId: number): Promise<BattleGiftSummary[]> {
+  try {
+    return await query<BattleGiftSummary>(`
+      SELECT g.room_username,
+             SUM(g.diamond_count * g.repeat_count) as total_diamonds,
+             COUNT(*) as total_gifts,
+             COUNT(DISTINCT g.user_id) as unique_donors
+      FROM gifts g
+      WHERE g.battle_id = $1 AND g.event_type = 'gift'
+      GROUP BY g.room_username
+      ORDER BY total_diamonds DESC
+    `, [battleId]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getBattleTopDonors(battleId: number, limit = 10): Promise<BattleGiftDonor[]> {
+  try {
+    return await query<BattleGiftDonor>(`
+      SELECT g.room_username, g.user_id, g.username,
+             SUM(g.diamond_count * g.repeat_count) as total_diamonds,
+             COUNT(*) as gift_count,
+             (SELECT g2.gift_name FROM gifts g2
+              WHERE g2.battle_id = $1 AND g2.user_id = g.user_id AND g2.event_type = 'gift'
+              ORDER BY g2.diamond_count * g2.repeat_count DESC LIMIT 1) as top_gift
+      FROM gifts g
+      WHERE g.battle_id = $1 AND g.event_type = 'gift'
+      GROUP BY g.room_username, g.user_id, g.username
+      ORDER BY total_diamonds DESC
+      LIMIT $2
+    `, [battleId, limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getBattleTopGifts(battleId: number, limit = 10): Promise<BattleGiftItem[]> {
+  try {
+    return await query<BattleGiftItem>(`
+      SELECT g.room_username, g.gift_name, g.diamond_count,
+             SUM(g.repeat_count) as total_sent,
+             SUM(g.diamond_count * g.repeat_count) as total_diamonds
+      FROM gifts g
+      WHERE g.battle_id = $1 AND g.event_type = 'gift'
+      GROUP BY g.room_username, g.gift_name, g.diamond_count
+      ORDER BY total_diamonds DESC
+      LIMIT $2
+    `, [battleId, limit]);
+  } catch {
+    return [];
+  }
+}
+
 export async function getSessionChatMessages(sessionId: number, since?: string): Promise<ChatMessageRow[]> {
   try {
     if (since) {
