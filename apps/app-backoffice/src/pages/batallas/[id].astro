@@ -25,14 +25,14 @@ let isActive = false;
 let error: string | null = null;
 
 try {
-  battle = getBattle(id);
+  battle = await getBattle(id);
   if (!battle) {
     return Astro.redirect("/sesiones");
   }
-  messages = getBattleChatMessages(battle.battle_id);
-  isActive = isBattleActive(battle.battle_id);
+  messages = await getBattleChatMessages(battle.battle_id);
+  isActive = await isBattleActive(battle.battle_id);
   try {
-    guests = getSessionGuests(battle.session_id);
+    guests = await getSessionGuests(battle.session_id);
   } catch {
     // guests table may not exist
   }
@@ -42,7 +42,7 @@ try {
 
 const hostMessages = messages.filter((m) => m.room_username === battle?.host_username && m.text !== "__join__");
 const opponentMessages = messages.filter((m) => m.room_username === battle?.opponent_username && m.text !== "__join__");
-const latestJoin = battle ? getLatestViewerJoin(battle.session_id) : null;
+const latestJoin = battle ? await getLatestViewerJoin(battle.session_id) : null;
 
 const won = battle && battle.host_score > battle.opponent_score;
 const lost = battle && battle.host_score < battle.opponent_score;

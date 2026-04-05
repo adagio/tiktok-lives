@@ -7,7 +7,6 @@ Usage:
 import argparse
 import os
 import re
-import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -23,7 +22,9 @@ load_dotenv(REPO_ROOT / ".env")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DB_PATH = REPO_ROOT / "clips.db"
+sys.path.insert(0, str(REPO_ROOT / "libs"))
+from db import get_connection
+
 GEMINI_MODEL = "gemini-2.5-flash"
 LOCAL_TZ = ZoneInfo(os.environ.get("DISPLAY_TZ", "UTC"))
 MAX_RETRIES = 3
@@ -51,12 +52,15 @@ Transcrito:
 {truncated}"""
 
 
-def to_local_date(iso_str: str) -> str:
+def to_local_date(date_val) -> str:
     try:
-        dt = datetime.fromisoformat(iso_str).astimezone(LOCAL_TZ)
-        return dt.strftime("%Y-%m-%d %H:%M")
+        if isinstance(date_val, str):
+            dt = datetime.fromisoformat(date_val)
+        else:
+            dt = date_val
+        return dt.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
     except (ValueError, TypeError):
-        return iso_str[:16]
+        return str(date_val)[:16]
 
 
 def summarize(client: genai.Client, prompt: str) -> str | None:
@@ -94,18 +98,17 @@ def main():
         sys.exit("GEMINI_API_KEY not set in .env")
 
     client = genai.Client(api_key=api_key)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = get_connection()
 
     # Build query
     conditions = ["EXISTS (SELECT 1 FROM chunks c WHERE c.session_id = s.id)"]
     params = []
 
     if args.session:
-        conditions.append("s.id = ?")
+        conditions.append("s.id = %s")
         params.append(args.session)
     if args.date:
-        conditions.append("s.date LIKE ?")
+        conditions.append("s.date::text LIKE %s")
         params.append(f"{args.date}%")
     if not args.force:
         conditions.append("(s.summary IS NULL OR s.summary = '')")
@@ -118,6 +121,8 @@ def main():
         conn.close()
         return
 
+    from pipeline_telemetry import log_event
+
     print(f"Resumiendo {len(sessions)} sesiones con {GEMINI_MODEL}...\n", flush=True)
 
     success = 0
@@ -125,7 +130,7 @@ def main():
 
     for idx, (session_id, username, date, duration_seconds) in enumerate(sessions):
         chunks = conn.execute(
-            "SELECT text FROM chunks WHERE session_id = ? ORDER BY start_seconds",
+            "SELECT text FROM chunks WHERE session_id = %s ORDER BY start_seconds",
             (session_id,),
         ).fetchall()
 
@@ -138,22 +143,32 @@ def main():
         prompt = build_prompt(username, duration_min, transcript)
 
         label = f"[{idx+1}/{len(sessions)}] @{username} {to_local_date(date)}"
+        _step_t0 = time.time()
         try:
             summary = summarize(client, prompt)
             if summary:
-                conn.execute("UPDATE sessions SET summary = ? WHERE id = ?", (summary, session_id))
+                conn.execute("UPDATE sessions SET summary = %s WHERE id = %s", (summary, session_id))
                 conn.commit()
                 success += 1
                 preview = summary[:80].replace("\n", " ")
                 print(f"  {label}: {preview}...", flush=True)
+                log_event(session_id, "summarize", status="completed",
+                          elapsed_seconds=time.time() - _step_t0,
+                          record_count=len(summary), provider="gemini",
+                          detail={"model": GEMINI_MODEL})
             else:
                 print(f"  {label}: respuesta vacia", flush=True)
+                log_event(session_id, "summarize", status="skipped",
+                          elapsed_seconds=time.time() - _step_t0, provider="gemini")
 
-            time.sleep(4)  # 20 req/day budget
+            time.sleep(4)
 
         except Exception as e:
             errors += 1
             print(f"  {label}: error — {e}", flush=True)
+            log_event(session_id, "summarize", status="error",
+                      elapsed_seconds=time.time() - _step_t0, provider="gemini",
+                      detail={"error": str(e)[:200]})
             time.sleep(2)
 
     conn.close()

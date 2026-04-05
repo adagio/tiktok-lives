@@ -1,0 +1,310 @@
+---
+export const prerender = false;
+
+import Layout from "@/layouts/Layout.astro";
+import Icon from "@/components/Icon.astro";
+import { readWatchlist } from "@/lib/watchlist";
+import {
+  getLatestSessionByUsername,
+  getChatMessageCount,
+  isSessionActive,
+  getLatestVideo,
+  getActiveGuests,
+} from "@/lib/db";
+
+interface UserStatus {
+  username: string;
+  is_live: boolean;
+  active_guests: { username: string; nickname: string | null; joined_at: string }[];
+  latest_session: {
+    id: number;
+    date: string;
+    duration_seconds: number | null;
+  } | null;
+  message_count: number;
+  latest_video: {
+    video_id: string;
+    description: string | null;
+    create_time: string;
+  } | null;
+}
+
+let users: UserStatus[] = [];
+let error: string | null = null;
+
+try {
+  const watchlist = await readWatchlist();
+  users = await Promise.all(watchlist.users
+    .filter((u) => u.enabled)
+    .map(async (u) => {
+      const session = await getLatestSessionByUsername(u.username);
+      const active_guests = session ? await getActiveGuests(session.id) : [];
+      const is_live = (session ? await isSessionActive(session.id) : false) || active_guests.length > 0;
+      const message_count = session ? await getChatMessageCount(session.id) : 0;
+      const latestVideo = await getLatestVideo(u.username);
+
+      return {
+        username: u.username,
+        is_live,
+        active_guests,
+        latest_session: session
+          ? {
+              id: session.id,
+              date: session.date,
+              duration_seconds: session.duration_seconds,
+            }
+          : null,
+        message_count,
+        latest_video: latestVideo
+          ? {
+              video_id: latestVideo.video_id,
+              description: latestVideo.description,
+              create_time: latestVideo.create_time,
+            }
+          : null,
+      };
+    }));
+} catch (e) {
+  error = e instanceof Error ? e.message : "Error al cargar la watchlist";
+}
+---
+
+<Layout title="Monitoreados">
+  <h1 class="text-2xl font-bold text-text-primary mb-6">
+    <Icon name="eye" class="w-7 h-7 inline-block mr-2 align-text-bottom" />
+    Monitoreados
+  </h1>
+
+  {error ? (
+    <div class="bg-error-subtle border border-error/20 rounded-xl p-6 text-center" role="alert">
+      <p class="text-error font-medium mb-1">No se pudo cargar la watchlist</p>
+      <p class="text-error/70 text-sm">{error}</p>
+      <a href="/monitoreados" class="inline-block mt-3 text-sm text-error underline hover:no-underline">Reintentar</a>
+    </div>
+  ) : (
+    <div id="monitoreados-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {users.map((user) => (
+        <div
+          class:list={[
+            "relative rounded-xl border bg-card p-5 transition-all duration-200",
+            user.is_live
+              ? "border-l-4 border-l-red-500 border-t-border border-r-border border-b-border shadow-lg shadow-red-500/10"
+              : "border-border hover:border-text-muted",
+          ]}
+          data-username={user.username}
+        >
+          {/* Username */}
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-lg font-bold text-text-primary tracking-tight">
+              {user.username}
+            </h2>
+            {user.is_live ? (
+              <span class="inline-flex items-center gap-1.5 text-xs font-bold text-red-500 uppercase tracking-wider">
+                <span class="relative flex h-2.5 w-2.5">
+                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
+                </span>
+                En vivo
+              </span>
+            ) : (
+              <span class="inline-flex items-center gap-1.5 text-xs font-medium text-text-muted uppercase tracking-wider">
+                <span class="inline-flex rounded-full h-2 w-2 bg-text-muted/40"></span>
+                Offline
+              </span>
+            )}
+          </div>
+
+          {/* Session info */}
+          {user.latest_session ? (
+            <div class="space-y-2">
+              {user.is_live ? (
+                <a
+                  href={`/sesiones/${user.latest_session.id}`}
+                  class="block rounded-lg bg-red-500/10 px-3 py-2 text-sm hover:bg-red-500/20 transition-colors"
+                >
+                  <div class="flex items-center justify-between">
+                    <span class="text-red-400 font-medium">Sesión #{user.latest_session.id}</span>
+                    <span class="text-text-muted text-xs" data-live-duration={user.latest_session.date}></span>
+                  </div>
+                  {user.message_count > 0 && (
+                    <div class="text-xs text-text-secondary mt-1">
+                      {user.message_count.toLocaleString()} mensajes
+                    </div>
+                  )}
+                </a>
+              ) : (
+                <div class="text-sm text-text-secondary">
+                  <div class="flex items-center justify-between">
+                    <span>Última sesión</span>
+                    <a href={`/sesiones/${user.latest_session.id}`} class="text-brand hover:text-brand-hover text-xs font-medium">
+                      #{user.latest_session.id}
+                    </a>
+                  </div>
+                  <div class="text-xs text-text-muted mt-1" data-relative-time={user.latest_session.date}></div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p class="text-sm text-text-muted italic">Sin sesiones registradas</p>
+          )}
+
+          {/* Lobby / Active guests */}
+          {user.is_live && user.active_guests.length > 0 && (
+            <div class="mt-3 pt-3 border-t border-border" data-lobby={user.username}>
+              <div class="flex items-center gap-2 mb-2">
+                <span class="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 px-2.5 py-0.5 text-xs font-bold text-amber-400 uppercase tracking-wider">
+                  <span class="text-sm leading-none">🎙️</span>
+                  En lobby
+                </span>
+                <span class="text-xs text-text-muted" data-relative-time={user.active_guests[0].joined_at}></span>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                {user.active_guests.map((g) => (
+                  <span class="inline-flex items-center rounded-md bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-300" title={`@${g.username}`}>
+                    {g.nickname || g.username}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Latest video */}
+          {user.latest_video ? (
+            <div class="mt-3 pt-3 border-t border-border">
+              <a
+                href={`https://www.tiktok.com/@${user.username}/video/${user.latest_video.video_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="group flex items-start gap-2 text-sm"
+              >
+                <span class="text-base leading-none mt-0.5">🎬</span>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <span class="text-text-secondary group-hover:text-brand transition-colors font-medium text-xs">Último video</span>
+                    <span class="text-xs text-text-muted" data-relative-time={user.latest_video.create_time}></span>
+                  </div>
+                  {user.latest_video.description && (
+                    <p class="text-xs text-text-muted mt-0.5 truncate">{user.latest_video.description}</p>
+                  )}
+                </div>
+              </a>
+            </div>
+          ) : (
+            <div class="mt-3 pt-3 border-t border-border">
+              <span class="text-xs text-text-muted">Sin videos detectados</span>
+            </div>
+          )}
+        </div>
+      ))}
+
+      {users.length === 0 && (
+        <div class="col-span-full py-12 text-center text-text-muted">
+          <Icon name="eye" class="w-10 h-10 mx-auto mb-3 opacity-40" />
+          <p class="text-base mb-1">Sin monitoreados</p>
+          <p class="text-xs">Agregá usuarios a <code class="bg-card px-1.5 py-0.5 rounded text-text-secondary">watchlist.json</code></p>
+        </div>
+      )}
+    </div>
+  )}
+</Layout>
+
+<script>
+  function formatRelativeTime(dateStr: string): string {
+    const date = new Date(dateStr.includes("+") || dateStr.endsWith("Z") ? dateStr : dateStr + "Z");
+    const now = Date.now();
+    const diffMs = now - date.getTime();
+    const diffMin = Math.floor(diffMs / 60_000);
+    const diffH = Math.floor(diffMin / 60);
+    const diffD = Math.floor(diffH / 24);
+
+    if (diffMin < 1) return "Hace un momento";
+    if (diffMin < 60) return `Hace ${diffMin}m`;
+    if (diffH < 24) return `Hace ${diffH}h ${diffMin % 60}m`;
+    return `Hace ${diffD}d`;
+  }
+
+  function formatLiveDuration(dateStr: string): string {
+    const date = new Date(dateStr.includes("+") || dateStr.endsWith("Z") ? dateStr : dateStr + "Z");
+    const now = Date.now();
+    const diffMs = now - date.getTime();
+    const diffMin = Math.floor(diffMs / 60_000);
+    const h = Math.floor(diffMin / 60);
+    const m = diffMin % 60;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  }
+
+  function updateTimes() {
+    document.querySelectorAll<HTMLElement>("[data-relative-time]").forEach((el) => {
+      el.textContent = formatRelativeTime(el.dataset.relativeTime!);
+    });
+    document.querySelectorAll<HTMLElement>("[data-live-duration]").forEach((el) => {
+      el.textContent = formatLiveDuration(el.dataset.liveDuration!);
+    });
+  }
+
+  function updateCards(data: { users: Array<{
+    username: string;
+    is_live: boolean;
+    active_guests: { username: string; nickname: string | null; joined_at: string }[];
+    latest_session: { id: number; date: string; duration_seconds: number | null } | null;
+    message_count: number;
+    latest_video: { video_id: string; description: string | null; create_time: string } | null;
+  }> }) {
+    for (const user of data.users) {
+      const card = document.querySelector<HTMLElement>(`[data-username="${user.username}"]`);
+      if (!card) continue;
+
+      // Update live/offline badge
+      const isCurrentlyLive = card.classList.contains("border-l-red-500");
+      if (user.is_live !== isCurrentlyLive) {
+        window.location.reload();
+        return;
+      }
+
+      // Check if guest list changed — reload to update lobby section
+      const lobbyEl = card.querySelector<HTMLElement>(`[data-lobby="${user.username}"]`);
+      const currentGuestCount = lobbyEl ? lobbyEl.querySelectorAll("[class*='bg-amber-500/10']").length : 0;
+      const newGuestCount = user.active_guests?.length ?? 0;
+      if (currentGuestCount !== newGuestCount) {
+        window.location.reload();
+        return;
+      }
+
+      // Update message count for live sessions
+      if (user.is_live && user.latest_session) {
+        const msgEl = card.querySelector("[data-live-duration]")?.parentElement?.nextElementSibling;
+        if (msgEl && user.message_count > 0) {
+          msgEl.textContent = `${user.message_count.toLocaleString()} mensajes`;
+        }
+      }
+
+      // Update video relative time
+      if (user.latest_video) {
+        const videoTimeEl = card.querySelector<HTMLElement>(`a[href*="/video/"] [data-relative-time]`);
+        if (videoTimeEl) {
+          videoTimeEl.dataset.relativeTime = user.latest_video.create_time;
+        }
+      }
+    }
+  }
+
+  // Initial render of relative times
+  updateTimes();
+
+  // Update times every 30s
+  setInterval(updateTimes, 30_000);
+
+  // Poll status every 15s
+  setInterval(async () => {
+    try {
+      const res = await fetch("/api/monitoreados/status");
+      if (res.ok) {
+        const data = await res.json();
+        updateCards(data);
+      }
+    } catch {
+      // Silently ignore poll errors
+    }
+  }, 15_000);
+</script>

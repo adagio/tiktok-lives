@@ -11,7 +11,7 @@ if (!day) {
   return Astro.redirect("/dias");
 }
 
-const sessions = getDayDetail(day);
+const sessions = await getDayDetail(day);
 
 if (sessions.length === 0) {
   return Astro.redirect("/dias");

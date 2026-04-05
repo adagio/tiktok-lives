@@ -1,13 +1,50 @@
-import Database from "better-sqlite3";
+import pg from "pg";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+// Load .env from repo root
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = path.resolve(__dirname, "../../../../clips.db");
+const envPath = path.resolve(__dirname, "../../../../.env");
+try {
+  const envContent = readFileSync(envPath, "utf-8");
+  for (const line of envContent.split("\n")) {
+    const match = line.match(/^([^#=]+)=(.*)$/);
+    if (match) {
+      const key = match[1].trim();
+      const val = match[2].trim();
+      if (!process.env[key]) process.env[key] = val;
+    }
+  }
+} catch {}
 
-function getDb() {
-  return new Database(dbPath, { readonly: true });
+const SCHEMA = "tiktok_manager";
+
+const pool = new pg.Pool({
+  host: process.env.DB_HOST || "localhost",
+  port: parseInt(process.env.DB_PORT || "5432"),
+  database: process.env.DB_NAME || "PoCs_DB",
+  user: process.env.DB_USER || "postgres",
+  password: process.env.DB_PASSWORD || "",
+});
+
+async function query<T extends pg.QueryResultRow = any>(sql: string, params?: any[]): Promise<T[]> {
+  const client = await pool.connect();
+  try {
+    await client.query(`SET search_path TO ${SCHEMA}`);
+    const result = await client.query<T>(sql, params);
+    return result.rows;
+  } finally {
+    client.release();
+  }
 }
+
+async function queryOne<T extends pg.QueryResultRow = any>(sql: string, params?: any[]): Promise<T | null> {
+  const rows = await query<T>(sql, params);
+  return rows[0] ?? null;
+}
+
+// ─── Interfaces ───
 
 export interface ClipRow {
   id: number;
@@ -32,92 +69,11 @@ export interface Stats {
   uniqueQueries: number;
 }
 
-export function getStats(): Stats {
-  const db = getDb();
-  try {
-    const totalClips = (db.prepare("SELECT COUNT(*) as c FROM clips").get() as any).c;
-    const totalSessions = (db.prepare("SELECT COUNT(*) as c FROM sessions").get() as any).c;
-    const uniqueAuthors = (db.prepare("SELECT COUNT(DISTINCT username) as c FROM clips").get() as any).c;
-    const uniqueQueries = (db.prepare("SELECT COUNT(DISTINCT query) as c FROM clips").get() as any).c;
-    return { totalClips, totalSessions, uniqueAuthors, uniqueQueries };
-  } finally {
-    db.close();
-  }
-}
-
 export interface ClipFilters {
   author?: string;
   query?: string;
   mode?: string;
   limit?: number;
-}
-
-export function getClips(filters: ClipFilters = {}): ClipRow[] {
-  const db = getDb();
-  try {
-    const conditions: string[] = [];
-    const params: any[] = [];
-
-    if (filters.author) {
-      conditions.push("c.username = ?");
-      params.push(filters.author);
-    }
-    if (filters.query) {
-      conditions.push("c.query = ?");
-      params.push(filters.query);
-    }
-    if (filters.mode) {
-      conditions.push("c.search_mode = ?");
-      params.push(filters.mode);
-    }
-
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const limit = filters.limit ? `LIMIT ${filters.limit}` : "";
-
-    const sql = `
-      SELECT c.*, ch.text, s.date
-      FROM clips c
-      LEFT JOIN chunks ch ON c.chunk_id = ch.id
-      LEFT JOIN sessions s ON c.session_id = s.id
-      ${where}
-      ORDER BY c.score DESC
-      ${limit}
-    `;
-
-    return db.prepare(sql).all(...params) as ClipRow[];
-  } finally {
-    db.close();
-  }
-}
-
-export function getAuthors(): string[] {
-  const db = getDb();
-  try {
-    const rows = db.prepare("SELECT DISTINCT username FROM clips ORDER BY username").all() as any[];
-    return rows.map((r) => r.username);
-  } finally {
-    db.close();
-  }
-}
-
-export function getQueries(): string[] {
-  const db = getDb();
-  try {
-    const rows = db.prepare("SELECT DISTINCT query FROM clips ORDER BY query").all() as any[];
-    return rows.map((r) => r.query);
-  } finally {
-    db.close();
-  }
-}
-
-export function getModes(): string[] {
-  const db = getDb();
-  try {
-    const rows = db.prepare("SELECT DISTINCT search_mode FROM clips ORDER BY search_mode").all() as any[];
-    return rows.map((r) => r.search_mode);
-  } finally {
-    db.close();
-  }
 }
 
 export interface SessionRow {
@@ -131,67 +87,6 @@ export interface SessionRow {
   indexed_at: string;
   chunk_count: number;
   clip_count: number;
-}
-
-export const DS_VIDEO = 1;
-export const DS_CHAT = 2;
-export const DS_GIFTS = 4;
-export const DS_BATTLES = 8;
-export const DS_GUESTS = 16;
-export const DS_VIEWERS = 32;
-
-export function getDataSourceLabels(bitmask: number): string[] {
-  const labels: string[] = [];
-  if (bitmask & DS_VIDEO) labels.push("video");
-  if (bitmask & DS_CHAT) labels.push("chat");
-  if (bitmask & DS_GIFTS) labels.push("gifts");
-  if (bitmask & DS_BATTLES) labels.push("battles");
-  if (bitmask & DS_GUESTS) labels.push("guests");
-  if (bitmask & DS_VIEWERS) labels.push("viewers");
-  return labels;
-}
-
-export function getSessions(author?: string, status?: string): SessionRow[] {
-  const db = getDb();
-  try {
-    const conditions: string[] = [];
-    const params: any[] = [];
-
-    if (author) {
-      conditions.push("s.username = ?");
-      params.push(author);
-    }
-    if (status) {
-      conditions.push("s.status = ?");
-      params.push(status);
-    }
-
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-
-    const sql = `
-      SELECT s.id, s.username, s.date, s.duration_seconds, s.status,
-        s.data_sources, s.data_duration_seconds, s.indexed_at,
-        (SELECT COUNT(*) FROM chunks ch WHERE ch.session_id = s.id) as chunk_count,
-        (SELECT COUNT(*) FROM clips c WHERE c.session_id = s.id) as clip_count
-      FROM sessions s
-      ${where}
-      ORDER BY s.date DESC
-    `;
-
-    return db.prepare(sql).all(...params) as SessionRow[];
-  } finally {
-    db.close();
-  }
-}
-
-export function getSessionAuthors(): string[] {
-  const db = getDb();
-  try {
-    const rows = db.prepare("SELECT DISTINCT username FROM sessions ORDER BY username").all() as any[];
-    return rows.map((r) => r.username);
-  } finally {
-    db.close();
-  }
 }
 
 export interface SessionDetail {
@@ -216,49 +111,7 @@ export interface ChunkRow {
   start_seconds: number;
   end_seconds: number;
   text: string;
-  embedding: Buffer | null;
 }
-
-export function getSession(id: number): SessionDetail | null {
-  const db = getDb();
-  try {
-    return (db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionDetail) ?? null;
-  } finally {
-    db.close();
-  }
-}
-
-export function getSessionChunks(sessionId: number): ChunkRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        "SELECT id, chunk_index, start_seconds, end_seconds, text, embedding FROM chunks WHERE session_id = ? ORDER BY start_seconds",
-      )
-      .all(sessionId) as ChunkRow[];
-  } finally {
-    db.close();
-  }
-}
-
-export function getSessionClips(sessionId: number): ClipRow[] {
-  const db = getDb();
-  try {
-    const sql = `
-      SELECT c.*, ch.text, s.date
-      FROM clips c
-      LEFT JOIN chunks ch ON c.chunk_id = ch.id
-      LEFT JOIN sessions s ON c.session_id = s.id
-      WHERE c.session_id = ?
-      ORDER BY c.start_seconds
-    `;
-    return db.prepare(sql).all(sessionId) as ClipRow[];
-  } finally {
-    db.close();
-  }
-}
-
-// --- Battles ---
 
 export interface BattleRow {
   id: number;
@@ -271,24 +124,6 @@ export interface BattleRow {
   detected_at: string;
 }
 
-export function getSessionBattles(sessionId: number): BattleRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        "SELECT * FROM battles WHERE session_id = ? ORDER BY detected_at",
-      )
-      .all(sessionId) as BattleRow[];
-  } catch {
-    // battles table may not exist yet
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
-// --- Guests (ventanilla / link mic) ---
-
 export interface GuestRow {
   id: number;
   session_id: number;
@@ -298,87 +133,6 @@ export interface GuestRow {
   joined_at: string;
   left_at: string | null;
 }
-
-export function getSessionGuests(sessionId: number): GuestRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        "SELECT * FROM guests WHERE session_id = ? ORDER BY joined_at",
-      )
-      .all(sessionId) as GuestRow[];
-  } catch {
-    // guests table may not exist yet
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
-export function getActiveGuests(sessionId: number): { username: string; nickname: string | null; joined_at: string }[] {
-  const db = getDb();
-  try {
-    // Staleness safety net: ignore guests joined >4h ago unless there's recent chat (30min).
-    // Protects against orphaned guests from monitor crashes.
-    return db
-      .prepare(
-        `SELECT username, nickname, joined_at FROM guests
-         WHERE session_id = ? AND left_at IS NULL
-           AND (
-             joined_at > datetime('now', '-4 hours')
-             OR EXISTS (
-               SELECT 1 FROM chat_messages
-               WHERE session_id = ? AND timestamp > datetime('now', '-30 minutes')
-             )
-           )
-         ORDER BY joined_at`,
-      )
-      .all(sessionId, sessionId) as { username: string; nickname: string | null; joined_at: string }[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
-export function getLatestGuest(sessionId: number): { username: string; nickname: string | null; joined_at: string } | null {
-  const db = getDb();
-  try {
-    return (db
-      .prepare(
-        "SELECT username, nickname, joined_at FROM guests WHERE session_id = ? ORDER BY joined_at DESC LIMIT 1",
-      )
-      .get(sessionId) as { username: string; nickname: string | null; joined_at: string }) ?? null;
-  } catch {
-    return null;
-  } finally {
-    db.close();
-  }
-}
-
-export function getLatestViewerJoin(sessionId: number, roomUsername?: string): { username: string; joined_at: string } | null {
-  const db = getDb();
-  try {
-    if (roomUsername) {
-      return (db
-        .prepare(
-          "SELECT username, joined_at FROM viewer_joins WHERE session_id = ? AND room_username = ? ORDER BY joined_at DESC LIMIT 1",
-        )
-        .get(sessionId, roomUsername) as { username: string; joined_at: string }) ?? null;
-    }
-    return (db
-      .prepare(
-        "SELECT username, joined_at FROM viewer_joins WHERE session_id = ? ORDER BY joined_at DESC LIMIT 1",
-      )
-      .get(sessionId) as { username: string; joined_at: string }) ?? null;
-  } catch {
-    return null;
-  } finally {
-    db.close();
-  }
-}
-
-// --- Chat messages ---
 
 export interface ChatMessageRow {
   id: number;
@@ -394,124 +148,6 @@ export interface ChatMessageRow {
 export interface BattleDetail extends BattleRow {
   host_username: string;
 }
-
-export function getBattle(id: number): BattleDetail | null {
-  const db = getDb();
-  try {
-    return (
-      (db
-        .prepare(
-          `SELECT b.*, s.username as host_username
-           FROM battles b
-           JOIN sessions s ON b.session_id = s.id
-           WHERE b.id = ?`,
-        )
-        .get(id) as BattleDetail) ?? null
-    );
-  } finally {
-    db.close();
-  }
-}
-
-export function getBattleChatMessages(
-  battleId: number,
-  since?: string,
-): ChatMessageRow[] {
-  const db = getDb();
-  try {
-    if (since) {
-      return db
-        .prepare(
-          `SELECT * FROM chat_messages
-           WHERE battle_id = ? AND timestamp > ?
-           ORDER BY timestamp`,
-        )
-        .all(battleId, since) as ChatMessageRow[];
-    }
-    return db
-      .prepare(
-        `SELECT * FROM chat_messages
-         WHERE battle_id = ?
-         ORDER BY timestamp`,
-      )
-      .all(battleId) as ChatMessageRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
-export function isBattleActive(battleId: number): boolean {
-  const db = getDb();
-  try {
-    const row = db
-      .prepare(
-        `SELECT MAX(timestamp) as last_ts FROM chat_messages WHERE battle_id = ?`,
-      )
-      .get(battleId) as { last_ts: string | null } | undefined;
-    if (!row?.last_ts) return false;
-    const tsStr = row.last_ts;
-    const lastTs = new Date(tsStr.includes("+") || tsStr.endsWith("Z") ? tsStr : tsStr + "Z").getTime();
-    const now = Date.now();
-    return now - lastTs < 30_000;
-  } catch {
-    return false;
-  } finally {
-    db.close();
-  }
-}
-
-export function getSessionChatMessages(
-  sessionId: number,
-  since?: string,
-): ChatMessageRow[] {
-  const db = getDb();
-  try {
-    if (since) {
-      return db
-        .prepare(
-          `SELECT * FROM chat_messages
-           WHERE session_id = ? AND timestamp > ?
-           ORDER BY timestamp`,
-        )
-        .all(sessionId, since) as ChatMessageRow[];
-    }
-    return db
-      .prepare(
-        `SELECT * FROM chat_messages
-         WHERE session_id = ?
-         ORDER BY timestamp`,
-      )
-      .all(sessionId) as ChatMessageRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
-export function isSessionActive(sessionId: number): boolean {
-  const db = getDb();
-  try {
-    const row = db
-      .prepare(
-        `SELECT MAX(timestamp) as last_ts FROM chat_messages WHERE session_id = ?`,
-      )
-      .get(sessionId) as { last_ts: string | null } | undefined;
-    if (!row?.last_ts) return false;
-    const tsStr = row.last_ts;
-    const lastTs = new Date(tsStr.includes("+") || tsStr.endsWith("Z") ? tsStr : tsStr + "Z").getTime();
-    const now = Date.now();
-    return now - lastTs < 30_000;
-  } catch {
-    return false;
-  } finally {
-    db.close();
-  }
-}
-
-// --- Topic scoring (pre-computed) ---
 
 export interface SessionTopicRow {
   topic: string;
@@ -540,142 +176,12 @@ export interface HeatmapRow {
   max_score: number;
 }
 
-/** Get max score per topic across all sessions (for global ranking) */
-export function getGlobalTopicScores(): { topic: string; max_score: number }[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        "SELECT topic, MAX(max_score) as max_score FROM session_topics GROUP BY topic ORDER BY max_score DESC",
-      )
-      .all() as { topic: string; max_score: number }[];
-  } finally {
-    db.close();
-  }
-}
-
-/** Get topic scores for a specific session */
-export function getSessionTopicScores(sessionId: number): SessionTopicRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        "SELECT topic, max_score, avg_score, best_chunk_id FROM session_topics WHERE session_id = ? ORDER BY max_score DESC",
-      )
-      .all(sessionId) as SessionTopicRow[];
-  } finally {
-    db.close();
-  }
-}
-
-/** Get the full session×topic matrix for heatmap */
-export function getHeatmapData(): HeatmapRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT st.session_id, s.username, s.date, st.topic, st.max_score
-         FROM session_topics st
-         JOIN sessions s ON st.session_id = s.id
-         ORDER BY s.date ASC, st.topic`,
-      )
-      .all() as HeatmapRow[];
-  } finally {
-    db.close();
-  }
-}
-
-/** Get latest session for a given username */
-export function getLatestSessionByUsername(username: string): SessionRow | null {
-  const db = getDb();
-  try {
-    const sql = `
-      SELECT s.id, s.username, s.date, s.duration_seconds, s.indexed_at,
-        (SELECT COUNT(*) FROM chunks ch WHERE ch.session_id = s.id) as chunk_count,
-        (SELECT COUNT(*) FROM clips c WHERE c.session_id = s.id) as clip_count
-      FROM sessions s
-      WHERE s.username = ?
-      ORDER BY s.date DESC
-      LIMIT 1
-    `;
-    return (db.prepare(sql).get(username) as SessionRow) ?? null;
-  } finally {
-    db.close();
-  }
-}
-
-/** Get count of chat messages for a session */
-export function getChatMessageCount(sessionId: number): number {
-  const db = getDb();
-  try {
-    const row = db
-      .prepare("SELECT COUNT(*) as c FROM chat_messages WHERE session_id = ?")
-      .get(sessionId) as { c: number };
-    return row.c;
-  } catch {
-    return 0;
-  } finally {
-    db.close();
-  }
-}
-
-/** Get latest video uploaded by a username */
-export interface UserVideoRow {
-  id: number;
-  username: string;
-  video_id: string;
-  description: string | null;
-  create_time: string;
-  detected_at: string;
-}
-
-export function getLatestVideo(username: string): UserVideoRow | null {
-  const db = getDb();
-  try {
-    return (
-      (db
-        .prepare(
-          "SELECT * FROM user_videos WHERE username = ? ORDER BY create_time DESC LIMIT 1",
-        )
-        .get(username) as UserVideoRow) ?? null
-    );
-  } catch {
-    // table may not exist yet
-    return null;
-  } finally {
-    db.close();
-  }
-}
-
-// --- Authors ---
-
 export interface AuthorListRow {
   username: string;
   total_sessions: number;
   first_session: string;
   last_session: string;
   total_duration: number | null;
-}
-
-export function getAuthorList(): AuthorListRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT
-          s.username,
-          COUNT(*) as total_sessions,
-          MIN(DATE(s.date)) as first_session,
-          MAX(DATE(s.date)) as last_session,
-          SUM(s.duration_seconds) as total_duration
-        FROM sessions s
-        GROUP BY s.username
-        ORDER BY MAX(s.date) DESC`,
-      )
-      .all() as AuthorListRow[];
-  } finally {
-    db.close();
-  }
 }
 
 export interface AuthorDailySummaryRow {
@@ -691,102 +197,11 @@ export interface AuthorDailySummaryRow {
   chat_messages: number;
 }
 
-export function getAuthorDailySummary(username: string): AuthorDailySummaryRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT
-          DATE(s.date) as day,
-          COUNT(DISTINCT s.id) as session_count,
-          SUM(s.duration_seconds) as total_duration,
-          (SELECT COUNT(*) FROM battles b WHERE b.session_id IN
-            (SELECT id FROM sessions WHERE username = ? AND DATE(date) = DATE(s.date))
-          ) as battle_count,
-          (SELECT COALESCE(SUM(b.host_score), 0) FROM battles b WHERE b.session_id IN
-            (SELECT id FROM sessions WHERE username = ? AND DATE(date) = DATE(s.date))
-          ) as total_host_points,
-          (SELECT COALESCE(SUM(CASE WHEN b.host_score > b.opponent_score THEN 1 ELSE 0 END), 0)
-            FROM battles b WHERE b.session_id IN
-            (SELECT id FROM sessions WHERE username = ? AND DATE(date) = DATE(s.date))
-          ) as wins,
-          (SELECT COALESCE(SUM(CASE WHEN b.host_score < b.opponent_score THEN 1 ELSE 0 END), 0)
-            FROM battles b WHERE b.session_id IN
-            (SELECT id FROM sessions WHERE username = ? AND DATE(date) = DATE(s.date))
-          ) as losses,
-          (SELECT COALESCE(SUM(CASE WHEN b.host_score = b.opponent_score THEN 1 ELSE 0 END), 0)
-            FROM battles b WHERE b.session_id IN
-            (SELECT id FROM sessions WHERE username = ? AND DATE(date) = DATE(s.date))
-          ) as draws,
-          (SELECT COUNT(DISTINCT g.user_id) FROM guests g WHERE g.session_id IN
-            (SELECT id FROM sessions WHERE username = ? AND DATE(date) = DATE(s.date))
-          ) as unique_guests,
-          (SELECT COUNT(*) FROM chat_messages cm WHERE cm.session_id IN
-            (SELECT id FROM sessions WHERE username = ? AND DATE(date) = DATE(s.date))
-          ) as chat_messages
-        FROM sessions s
-        WHERE s.username = ?
-        GROUP BY DATE(s.date)
-        ORDER BY day DESC`,
-      )
-      .all(username, username, username, username, username, username, username, username) as AuthorDailySummaryRow[];
-  } catch {
-    // battles/guests/chat_messages tables may not exist yet
-    return db
-      .prepare(
-        `SELECT
-          DATE(s.date) as day,
-          COUNT(DISTINCT s.id) as session_count,
-          SUM(s.duration_seconds) as total_duration,
-          0 as battle_count,
-          0 as total_host_points,
-          0 as wins,
-          0 as losses,
-          0 as draws,
-          0 as unique_guests,
-          0 as chat_messages
-        FROM sessions s
-        WHERE s.username = ?
-        GROUP BY DATE(s.date)
-        ORDER BY day DESC`,
-      )
-      .all(username) as AuthorDailySummaryRow[];
-  } finally {
-    db.close();
-  }
-}
-
-// --- Author interaction rankings ---
-
 export interface DonorRankingRow {
   user_id: number;
   username: string;
   total_diamonds: number;
   gift_count: number;
-}
-
-export function getTopDonors(username: string, limit = 10): DonorRankingRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT g.user_id, g.username,
-                SUM(g.diamond_count * g.repeat_count) as total_diamonds,
-                COUNT(*) as gift_count
-         FROM gifts g
-         JOIN sessions s ON g.session_id = s.id
-         WHERE s.username = ? AND g.room_username = ?
-           AND g.event_type = 'gift'
-         GROUP BY g.user_id
-         ORDER BY total_diamonds DESC
-         LIMIT ?`,
-      )
-      .all(username, username, limit) as DonorRankingRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
 }
 
 export interface GlobalDonorRow {
@@ -804,68 +219,12 @@ export interface GlobalDonorRow {
   last_gift: string | null;
 }
 
-export function getGlobalDonors(limit = 50): GlobalDonorRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT g.user_id, g.username,
-                SUM(g.diamond_count * g.repeat_count) as total_diamonds,
-                SUM(gc.coin_cost * g.repeat_count) as total_coins,
-                COUNT(*) as gift_count,
-                SUM(g.repeat_count) as total_repeats,
-                COUNT(DISTINCT g.session_id) as sessions,
-                COUNT(DISTINCT g.room_username) as streamers,
-                (SELECT g2.gift_name FROM gifts g2 WHERE g2.user_id = g.user_id AND g2.event_type = 'gift'
-                 ORDER BY g2.diamond_count * g2.repeat_count DESC LIMIT 1) as top_gift,
-                (SELECT g3.room_username FROM gifts g3 WHERE g3.user_id = g.user_id AND g3.event_type = 'gift'
-                 GROUP BY g3.room_username ORDER BY SUM(g3.diamond_count * g3.repeat_count) DESC LIMIT 1) as top_receiver,
-                MIN(g.timestamp) as first_gift,
-                MAX(g.timestamp) as last_gift
-         FROM gifts g
-         LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
-         WHERE g.event_type = 'gift'
-         GROUP BY g.user_id
-         ORDER BY total_diamonds DESC
-         LIMIT ?`,
-      )
-      .all(limit) as GlobalDonorRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
 export interface DonorGiftBreakdown {
   gift_name: string;
   diamond_count: number;
   coin_cost: number | null;
   total_sent: number;
   total_diamonds: number;
-}
-
-export function getDonorGifts(userId: number): DonorGiftBreakdown[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT g.gift_name, g.diamond_count,
-                gc.coin_cost,
-                SUM(g.repeat_count) as total_sent,
-                SUM(g.diamond_count * g.repeat_count) as total_diamonds
-         FROM gifts g
-         LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
-         WHERE g.user_id = ? AND g.event_type = 'gift'
-         GROUP BY g.gift_name
-         ORDER BY total_diamonds DESC`,
-      )
-      .all(userId) as DonorGiftBreakdown[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
 }
 
 export interface GiftCatalogRow {
@@ -877,61 +236,12 @@ export interface GiftCatalogRow {
   unique_senders: number;
 }
 
-export function getGiftCatalogStats(): GiftCatalogRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT g.gift_name, g.diamond_count,
-                gc.coin_cost,
-                SUM(g.repeat_count) as total_sent,
-                SUM(g.diamond_count * g.repeat_count) as total_diamonds,
-                COUNT(DISTINCT g.user_id) as unique_senders
-         FROM gifts g
-         LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
-         WHERE g.event_type = 'gift'
-         GROUP BY g.gift_name
-         ORDER BY total_diamonds DESC`,
-      )
-      .all() as GiftCatalogRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
 export interface VentanillaRankingRow {
   user_id: number;
   username: string;
   nickname: string | null;
   total_seconds: number;
   visit_count: number;
-}
-
-export function getTopVentanilla(username: string, limit = 10): VentanillaRankingRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT g.user_id, g.username, g.nickname,
-                SUM(
-                  CAST((julianday(COALESCE(g.left_at, datetime('now'))) - julianday(g.joined_at)) * 86400 AS INTEGER)
-                ) as total_seconds,
-                COUNT(*) as visit_count
-         FROM guests g
-         JOIN sessions s ON g.session_id = s.id
-         WHERE s.username = ?
-         GROUP BY g.user_id
-         ORDER BY total_seconds DESC
-         LIMIT ?`,
-      )
-      .all(username, limit) as VentanillaRankingRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
 }
 
 export interface OpponentRankingRow {
@@ -943,80 +253,16 @@ export interface OpponentRankingRow {
   losses: number;
 }
 
-export function getTopOpponents(username: string, limit = 10): OpponentRankingRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT b.opponent_username,
-                COUNT(*) as total_battles,
-                SUM(b.opponent_score) as total_opponent_score,
-                SUM(b.host_score) as total_host_score,
-                SUM(CASE WHEN b.host_score > b.opponent_score THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN b.host_score < b.opponent_score THEN 1 ELSE 0 END) as losses
-         FROM battles b
-         JOIN sessions s ON b.session_id = s.id
-         WHERE s.username = ?
-         GROUP BY b.opponent_username
-         ORDER BY total_battles DESC
-         LIMIT ?`,
-      )
-      .all(username, limit) as OpponentRankingRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
-// --- Chat analysis (LLM-generated topics + summary) ---
-
 export interface ChatAnalysisRow {
   topics: string;
   summary: string;
 }
-
-export function getChatAnalysis(sessionId: number): ChatAnalysisRow | null {
-  const db = getDb();
-  try {
-    return (
-      (db
-        .prepare("SELECT topics, summary FROM chat_analysis WHERE session_id = ?")
-        .get(sessionId) as ChatAnalysisRow) ?? null
-    );
-  } catch {
-    return null;
-  } finally {
-    db.close();
-  }
-}
-
-// --- Days page ---
 
 export interface DayRow {
   day: string;
   session_count: number;
   total_duration: number;
   authors: string;
-}
-
-export function getDays(): DayRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT DATE(s.date) as day,
-                COUNT(*) as session_count,
-                COALESCE(SUM(s.duration_seconds), 0) as total_duration,
-                GROUP_CONCAT(DISTINCT s.username) as authors
-         FROM sessions s
-         GROUP BY DATE(s.date)
-         ORDER BY day DESC`,
-      )
-      .all() as DayRow[];
-  } finally {
-    db.close();
-  }
 }
 
 export interface DayDetailRow {
@@ -1033,32 +279,6 @@ export interface DayDetailRow {
   chunk_count: number;
 }
 
-export function getDayDetail(day: string): DayDetailRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date, s.duration_seconds, s.summary,
-                ca.summary as chat_summary, ca.topics as chat_topics,
-                (SELECT COUNT(*) FROM battles b WHERE b.session_id = s.id) as battle_count,
-                (SELECT COUNT(DISTINCT g.user_id) FROM guests g WHERE g.session_id = s.id) as guest_count,
-                (SELECT COUNT(*) FROM chat_messages cm WHERE cm.session_id = s.id) as chat_message_count,
-                (SELECT COUNT(*) FROM chunks c WHERE c.session_id = s.id) as chunk_count
-         FROM sessions s
-         LEFT JOIN chat_analysis ca ON ca.session_id = s.id
-         WHERE DATE(s.date) = ?
-         ORDER BY s.date`,
-      )
-      .all(day) as DayDetailRow[];
-  } catch {
-    return [];
-  } finally {
-    db.close();
-  }
-}
-
-// --- Stats page ---
-
 export interface StatSessionRow {
   session_id: number;
   username: string;
@@ -1066,160 +286,716 @@ export interface StatSessionRow {
   value: number;
 }
 
-export function getTopByDuration(limit = 5): StatSessionRow[] {
-  const db = getDb();
-  try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date,
-                COALESCE(s.duration_seconds, 0) as value
-         FROM sessions s
-         ORDER BY value DESC LIMIT ?`,
-      )
-      .all(limit) as StatSessionRow[];
-  } finally {
-    db.close();
-  }
+export interface UserVideoRow {
+  id: number;
+  username: string;
+  video_id: string;
+  description: string | null;
+  create_time: string;
+  detected_at: string;
 }
 
-export function getTopByGuests(limit = 5): StatSessionRow[] {
-  const db = getDb();
+// ─── Data source bitmask ───
+
+export const DS_VIDEO = 1;
+export const DS_CHAT = 2;
+export const DS_GIFTS = 4;
+export const DS_BATTLES = 8;
+export const DS_GUESTS = 16;
+export const DS_VIEWERS = 32;
+
+export function getDataSourceLabels(bitmask: number): string[] {
+  const labels: string[] = [];
+  if (bitmask & DS_VIDEO) labels.push("video");
+  if (bitmask & DS_CHAT) labels.push("chat");
+  if (bitmask & DS_GIFTS) labels.push("gifts");
+  if (bitmask & DS_BATTLES) labels.push("battles");
+  if (bitmask & DS_GUESTS) labels.push("guests");
+  if (bitmask & DS_VIEWERS) labels.push("viewers");
+  return labels;
+}
+
+// ─── Queries ───
+
+export async function getStats(): Promise<Stats> {
+  const r = await queryOne<any>(`
+    SELECT
+      (SELECT COUNT(*) FROM clips) as "totalClips",
+      (SELECT COUNT(*) FROM sessions) as "totalSessions",
+      (SELECT COUNT(DISTINCT username) FROM clips) as "uniqueAuthors",
+      (SELECT COUNT(DISTINCT query) FROM clips) as "uniqueQueries"
+  `);
+  return r!;
+}
+
+export async function getClips(filters: ClipFilters = {}): Promise<ClipRow[]> {
+  const conditions: string[] = [];
+  const params: any[] = [];
+  let idx = 1;
+
+  if (filters.author) {
+    conditions.push(`c.username = $${idx++}`);
+    params.push(filters.author);
+  }
+  if (filters.query) {
+    conditions.push(`c.query = $${idx++}`);
+    params.push(filters.query);
+  }
+  if (filters.mode) {
+    conditions.push(`c.search_mode = $${idx++}`);
+    params.push(filters.mode);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = filters.limit ? `LIMIT ${filters.limit}` : "";
+
+  return query<ClipRow>(`
+    SELECT c.*, ch.text, s.date
+    FROM clips c
+    LEFT JOIN chunks ch ON c.chunk_id = ch.id
+    LEFT JOIN sessions s ON c.session_id = s.id
+    ${where}
+    ORDER BY c.score DESC
+    ${limit}
+  `, params);
+}
+
+export async function getAuthors(): Promise<string[]> {
+  const rows = await query<{ username: string }>("SELECT DISTINCT username FROM clips ORDER BY username");
+  return rows.map((r) => r.username);
+}
+
+export async function getQueries(): Promise<string[]> {
+  const rows = await query<{ query: string }>("SELECT DISTINCT query FROM clips ORDER BY query");
+  return rows.map((r) => r.query);
+}
+
+export async function getModes(): Promise<string[]> {
+  const rows = await query<{ search_mode: string }>("SELECT DISTINCT search_mode FROM clips ORDER BY search_mode");
+  return rows.map((r) => r.search_mode);
+}
+
+export async function getSessions(author?: string, status?: string): Promise<SessionRow[]> {
+  const conditions: string[] = [];
+  const params: any[] = [];
+  let idx = 1;
+
+  if (author) {
+    conditions.push(`s.username = $${idx++}`);
+    params.push(author);
+  }
+  if (status) {
+    conditions.push(`s.status = $${idx++}`);
+    params.push(status);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  return query<SessionRow>(`
+    SELECT s.id, s.username, s.date, s.duration_seconds, s.status,
+      s.data_sources, s.data_duration_seconds, s.indexed_at,
+      (SELECT COUNT(*) FROM chunks ch WHERE ch.session_id = s.id) as chunk_count,
+      (SELECT COUNT(*) FROM clips c WHERE c.session_id = s.id) as clip_count
+    FROM sessions s
+    ${where}
+    ORDER BY s.date DESC
+  `, params);
+}
+
+export async function getSessionAuthors(): Promise<string[]> {
+  const rows = await query<{ username: string }>("SELECT DISTINCT username FROM sessions ORDER BY username");
+  return rows.map((r) => r.username);
+}
+
+export async function getSession(id: number): Promise<SessionDetail | null> {
+  return queryOne<SessionDetail>("SELECT * FROM sessions WHERE id = $1", [id]);
+}
+
+export async function getSessionChunks(sessionId: number): Promise<ChunkRow[]> {
+  return query<ChunkRow>(
+    "SELECT id, chunk_index, start_seconds, end_seconds, text FROM chunks WHERE session_id = $1 ORDER BY start_seconds",
+    [sessionId],
+  );
+}
+
+export async function getSessionClips(sessionId: number): Promise<ClipRow[]> {
+  return query<ClipRow>(`
+    SELECT c.*, ch.text, s.date
+    FROM clips c
+    LEFT JOIN chunks ch ON c.chunk_id = ch.id
+    LEFT JOIN sessions s ON c.session_id = s.id
+    WHERE c.session_id = $1
+    ORDER BY c.start_seconds
+  `, [sessionId]);
+}
+
+// --- Battles ---
+
+export async function getSessionBattles(sessionId: number): Promise<BattleRow[]> {
   try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date,
-                COUNT(DISTINCT g.user_id) as value
-         FROM sessions s
-         JOIN guests g ON g.session_id = s.id
-         GROUP BY s.id
-         ORDER BY value DESC LIMIT ?`,
-      )
-      .all(limit) as StatSessionRow[];
+    return await query<BattleRow>(
+      `SELECT bp_host.id, bp_host.session_id, bv.battle_id,
+              bp_opp.username AS opponent_username, bp_opp.user_id AS opponent_user_id,
+              bp_host.score AS host_score, bp_opp.score AS opponent_score,
+              bv.detected_at
+       FROM battle_participants bp_host
+       JOIN battles_v2 bv ON bp_host.battle_id = bv.battle_id
+       JOIN battle_participants bp_opp ON bp_opp.battle_id = bv.battle_id AND bp_opp.user_id != bp_host.user_id
+       WHERE bp_host.session_id = $1
+       ORDER BY bv.detected_at`,
+      [sessionId],
+    );
   } catch {
     return [];
-  } finally {
-    db.close();
   }
 }
 
-export function getTopByPoints(limit = 5): StatSessionRow[] {
-  const db = getDb();
+// --- Guests ---
+
+export async function getSessionGuests(sessionId: number): Promise<GuestRow[]> {
   try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date,
-                SUM(b.host_score) as value
-         FROM sessions s
-         JOIN battles b ON b.session_id = s.id
-         GROUP BY s.id
-         ORDER BY value DESC LIMIT ?`,
-      )
-      .all(limit) as StatSessionRow[];
+    return await query<GuestRow>(
+      "SELECT * FROM guests WHERE session_id = $1 ORDER BY joined_at",
+      [sessionId],
+    );
   } catch {
     return [];
-  } finally {
-    db.close();
   }
 }
 
-export function getTopByChatMessages(limit = 5): StatSessionRow[] {
-  const db = getDb();
+export async function getActiveGuests(sessionId: number): Promise<{ username: string; nickname: string | null; joined_at: string }[]> {
   try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date,
-                COUNT(*) as value
-         FROM sessions s
-         JOIN chat_messages cm ON cm.session_id = s.id
-         GROUP BY s.id
-         ORDER BY value DESC LIMIT ?`,
-      )
-      .all(limit) as StatSessionRow[];
+    return await query(
+      `SELECT username, nickname, joined_at FROM guests
+       WHERE session_id = $1 AND left_at IS NULL
+         AND (
+           joined_at > NOW() - INTERVAL '4 hours'
+           OR EXISTS (
+             SELECT 1 FROM chat_messages
+             WHERE session_id = $1 AND timestamp > NOW() - INTERVAL '30 minutes'
+           )
+         )
+       ORDER BY joined_at`,
+      [sessionId],
+    );
   } catch {
     return [];
-  } finally {
-    db.close();
   }
 }
 
-export function getTopByTranscriptDensity(limit = 5): StatSessionRow[] {
-  const db = getDb();
+export async function getLatestGuest(sessionId: number): Promise<{ username: string; nickname: string | null; joined_at: string } | null> {
   try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date,
-                COUNT(*) as value
-         FROM sessions s
-         JOIN chunks c ON c.session_id = s.id
-         GROUP BY s.id
-         ORDER BY value DESC LIMIT ?`,
-      )
-      .all(limit) as StatSessionRow[];
+    return await queryOne(
+      "SELECT username, nickname, joined_at FROM guests WHERE session_id = $1 ORDER BY joined_at DESC LIMIT 1",
+      [sessionId],
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function getLatestViewerJoin(sessionId: number, roomUsername?: string): Promise<{ username: string; joined_at: string } | null> {
+  try {
+    if (roomUsername) {
+      return await queryOne(
+        "SELECT username, joined_at FROM viewer_joins WHERE session_id = $1 AND room_username = $2 ORDER BY joined_at DESC LIMIT 1",
+        [sessionId, roomUsername],
+      );
+    }
+    return await queryOne(
+      "SELECT username, joined_at FROM viewer_joins WHERE session_id = $1 ORDER BY joined_at DESC LIMIT 1",
+      [sessionId],
+    );
+  } catch {
+    return null;
+  }
+}
+
+// --- Chat messages ---
+
+export async function getBattle(id: number): Promise<BattleDetail | null> {
+  return queryOne<BattleDetail>(`
+    SELECT bp_host.id, bp_host.session_id, bv.battle_id,
+           bp_opp.username AS opponent_username, bp_opp.user_id AS opponent_user_id,
+           bp_host.score AS host_score, bp_opp.score AS opponent_score,
+           bv.detected_at, s.username as host_username
+    FROM battle_participants bp_host
+    JOIN battles_v2 bv ON bp_host.battle_id = bv.battle_id
+    JOIN battle_participants bp_opp ON bp_opp.battle_id = bv.battle_id AND bp_opp.user_id != bp_host.user_id
+    JOIN sessions s ON bp_host.session_id = s.id
+    WHERE bp_host.id = $1
+  `, [id]);
+}
+
+export async function getBattleChatMessages(battleId: number, since?: string): Promise<ChatMessageRow[]> {
+  try {
+    if (since) {
+      return await query<ChatMessageRow>(
+        "SELECT * FROM chat_messages WHERE battle_id = $1 AND timestamp > $2 ORDER BY timestamp",
+        [battleId, since],
+      );
+    }
+    return await query<ChatMessageRow>(
+      "SELECT * FROM chat_messages WHERE battle_id = $1 ORDER BY timestamp",
+      [battleId],
+    );
   } catch {
     return [];
-  } finally {
-    db.close();
   }
 }
 
-export function getTopByBattles(limit = 5): StatSessionRow[] {
-  const db = getDb();
+export async function isBattleActive(battleId: number): Promise<boolean> {
   try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date,
-                COUNT(*) as value
-         FROM sessions s
-         JOIN battles b ON b.session_id = s.id
-         GROUP BY s.id
-         ORDER BY value DESC LIMIT ?`,
-      )
-      .all(limit) as StatSessionRow[];
+    const row = await queryOne<{ last_ts: string | null }>(
+      "SELECT MAX(timestamp) as last_ts FROM chat_messages WHERE battle_id = $1",
+      [battleId],
+    );
+    if (!row?.last_ts) return false;
+    const lastTs = new Date(row.last_ts).getTime();
+    return Date.now() - lastTs < 30_000;
+  } catch {
+    return false;
+  }
+}
+
+export async function getSessionChatMessages(sessionId: number, since?: string): Promise<ChatMessageRow[]> {
+  try {
+    if (since) {
+      return await query<ChatMessageRow>(
+        "SELECT * FROM chat_messages WHERE session_id = $1 AND timestamp > $2 ORDER BY timestamp",
+        [sessionId, since],
+      );
+    }
+    return await query<ChatMessageRow>(
+      "SELECT * FROM chat_messages WHERE session_id = $1 ORDER BY timestamp",
+      [sessionId],
+    );
   } catch {
     return [];
-  } finally {
-    db.close();
   }
 }
 
-export function getTopByUniqueViewers(limit = 5): StatSessionRow[] {
-  const db = getDb();
+export async function isSessionActive(sessionId: number): Promise<boolean> {
   try {
-    return db
-      .prepare(
-        `SELECT s.id as session_id, s.username, s.date,
-                COUNT(DISTINCT vj.user_id) as value
-         FROM sessions s
-         JOIN viewer_joins vj ON vj.session_id = s.id
-         GROUP BY s.id
-         ORDER BY value DESC LIMIT ?`,
-      )
-      .all(limit) as StatSessionRow[];
+    const row = await queryOne<{ last_ts: string | null }>(
+      "SELECT MAX(timestamp) as last_ts FROM chat_messages WHERE session_id = $1",
+      [sessionId],
+    );
+    if (!row?.last_ts) return false;
+    const lastTs = new Date(row.last_ts).getTime();
+    return Date.now() - lastTs < 30_000;
+  } catch {
+    return false;
+  }
+}
+
+// --- Topic scoring ---
+
+export async function getGlobalTopicScores(): Promise<{ topic: string; max_score: number }[]> {
+  return query(
+    "SELECT topic, MAX(max_score) as max_score FROM session_topics GROUP BY topic ORDER BY max_score DESC",
+  );
+}
+
+export async function getSessionTopicScores(sessionId: number): Promise<SessionTopicRow[]> {
+  return query<SessionTopicRow>(
+    "SELECT topic, max_score, avg_score, best_chunk_id FROM session_topics WHERE session_id = $1 ORDER BY max_score DESC",
+    [sessionId],
+  );
+}
+
+export async function getHeatmapData(): Promise<HeatmapRow[]> {
+  return query<HeatmapRow>(`
+    SELECT st.session_id, s.username, s.date, st.topic, st.max_score
+    FROM session_topics st
+    JOIN sessions s ON st.session_id = s.id
+    ORDER BY s.date ASC, st.topic
+  `);
+}
+
+export async function getTopicHighlights(topic: string, limit = 5): Promise<TopicHighlightRow[]> {
+  return query<TopicHighlightRow>(`
+    SELECT th.topic, th.chunk_id, th.session_id, th.score,
+           ch.text, ch.start_seconds, ch.end_seconds,
+           s.username, s.date
+    FROM topic_highlights th
+    LEFT JOIN chunks ch ON th.chunk_id = ch.id
+    LEFT JOIN sessions s ON th.session_id = s.id
+    WHERE th.topic = $1
+    ORDER BY th.score DESC
+    LIMIT $2
+  `, [topic, limit]);
+}
+
+// --- Sessions page ---
+
+export async function getLatestSessionByUsername(username: string): Promise<SessionRow | null> {
+  return queryOne<SessionRow>(`
+    SELECT s.id, s.username, s.date, s.duration_seconds, s.indexed_at,
+      (SELECT COUNT(*) FROM chunks ch WHERE ch.session_id = s.id) as chunk_count,
+      (SELECT COUNT(*) FROM clips c WHERE c.session_id = s.id) as clip_count
+    FROM sessions s
+    WHERE s.username = $1
+    ORDER BY s.date DESC
+    LIMIT 1
+  `, [username]);
+}
+
+export async function getChatMessageCount(sessionId: number): Promise<number> {
+  try {
+    const row = await queryOne<{ c: number }>(
+      "SELECT COUNT(*) as c FROM chat_messages WHERE session_id = $1",
+      [sessionId],
+    );
+    return Number(row?.c ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+export async function getLatestVideo(username: string): Promise<UserVideoRow | null> {
+  try {
+    return await queryOne<UserVideoRow>(
+      "SELECT * FROM user_videos WHERE username = $1 ORDER BY create_time DESC LIMIT 1",
+      [username],
+    );
+  } catch {
+    return null;
+  }
+}
+
+// --- Authors ---
+
+export async function getAuthorList(): Promise<AuthorListRow[]> {
+  return query<AuthorListRow>(`
+    SELECT
+      s.username,
+      COUNT(*) as total_sessions,
+      MIN(DATE(s.date)) as first_session,
+      MAX(DATE(s.date)) as last_session,
+      SUM(s.duration_seconds) as total_duration
+    FROM sessions s
+    GROUP BY s.username
+    ORDER BY MAX(s.date) DESC
+  `);
+}
+
+export async function getAuthorDailySummary(username: string): Promise<AuthorDailySummaryRow[]> {
+  try {
+    return await query<AuthorDailySummaryRow>(`
+      SELECT
+        DATE(s.date) as day,
+        COUNT(DISTINCT s.id) as session_count,
+        SUM(s.duration_seconds) as total_duration,
+        (SELECT COUNT(*) FROM battle_participants bp
+         JOIN sessions s2 ON bp.session_id = s2.id
+         WHERE s2.username = $1 AND DATE(s2.date) = DATE(s.date)
+        ) as battle_count,
+        (SELECT COALESCE(SUM(bp.score), 0) FROM battle_participants bp
+         JOIN sessions s2 ON bp.session_id = s2.id
+         WHERE s2.username = $1 AND DATE(s2.date) = DATE(s.date)
+        ) as total_host_points,
+        0 as wins, 0 as losses, 0 as draws,
+        (SELECT COUNT(DISTINCT g.user_id) FROM guests g
+         JOIN sessions s2 ON g.session_id = s2.id
+         WHERE s2.username = $1 AND DATE(s2.date) = DATE(s.date)
+        ) as unique_guests,
+        (SELECT COUNT(*) FROM chat_messages cm
+         JOIN sessions s2 ON cm.session_id = s2.id
+         WHERE s2.username = $1 AND DATE(s2.date) = DATE(s.date)
+        ) as chat_messages
+      FROM sessions s
+      WHERE s.username = $1
+      GROUP BY DATE(s.date)
+      ORDER BY day DESC
+    `, [username]);
+  } catch {
+    return await query<AuthorDailySummaryRow>(`
+      SELECT
+        DATE(s.date) as day,
+        COUNT(DISTINCT s.id) as session_count,
+        SUM(s.duration_seconds) as total_duration,
+        0 as battle_count, 0 as total_host_points,
+        0 as wins, 0 as losses, 0 as draws,
+        0 as unique_guests, 0 as chat_messages
+      FROM sessions s
+      WHERE s.username = $1
+      GROUP BY DATE(s.date)
+      ORDER BY day DESC
+    `, [username]);
+  }
+}
+
+// --- Donors ---
+
+export async function getTopDonors(username: string, limit = 10): Promise<DonorRankingRow[]> {
+  try {
+    return await query<DonorRankingRow>(`
+      SELECT g.user_id, g.username,
+             SUM(g.diamond_count * g.repeat_count) as total_diamonds,
+             COUNT(*) as gift_count
+      FROM gifts g
+      JOIN sessions s ON g.session_id = s.id
+      WHERE s.username = $1 AND g.room_username = $1
+        AND g.event_type = 'gift'
+      GROUP BY g.user_id, g.username
+      ORDER BY total_diamonds DESC
+      LIMIT $2
+    `, [username, limit]);
   } catch {
     return [];
-  } finally {
-    db.close();
   }
 }
 
-/** Get top chunks for a topic (global highlights) */
-export function getTopicHighlights(topic: string, limit = 5): TopicHighlightRow[] {
-  const db = getDb();
+export async function getGlobalDonors(limit = 50): Promise<GlobalDonorRow[]> {
   try {
-    return db
-      .prepare(
-        `SELECT th.topic, th.chunk_id, th.session_id, th.score,
-                ch.text, ch.start_seconds, ch.end_seconds,
-                s.username, s.date
-         FROM topic_highlights th
-         LEFT JOIN chunks ch ON th.chunk_id = ch.id
-         LEFT JOIN sessions s ON th.session_id = s.id
-         WHERE th.topic = ?
-         ORDER BY th.score DESC
-         LIMIT ?`,
-      )
-      .all(topic, limit) as TopicHighlightRow[];
-  } finally {
-    db.close();
+    return await query<GlobalDonorRow>(`
+      SELECT g.user_id, g.username,
+             SUM(g.diamond_count * g.repeat_count) as total_diamonds,
+             SUM(COALESCE(gc.coin_cost, 0) * g.repeat_count) as total_coins,
+             COUNT(*) as gift_count,
+             SUM(g.repeat_count) as total_repeats,
+             COUNT(DISTINCT g.session_id) as sessions,
+             COUNT(DISTINCT g.room_username) as streamers,
+             (SELECT g2.gift_name FROM gifts g2 WHERE g2.user_id = g.user_id AND g2.event_type = 'gift'
+              ORDER BY g2.diamond_count * g2.repeat_count DESC LIMIT 1) as top_gift,
+             (SELECT g3.room_username FROM gifts g3 WHERE g3.user_id = g.user_id AND g3.event_type = 'gift'
+              GROUP BY g3.room_username ORDER BY SUM(g3.diamond_count * g3.repeat_count) DESC LIMIT 1) as top_receiver,
+             MIN(g.timestamp) as first_gift,
+             MAX(g.timestamp) as last_gift
+      FROM gifts g
+      LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
+      WHERE g.event_type = 'gift'
+      GROUP BY g.user_id, g.username
+      ORDER BY total_diamonds DESC
+      LIMIT $1
+    `, [limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getDonorGifts(userId: number): Promise<DonorGiftBreakdown[]> {
+  try {
+    return await query<DonorGiftBreakdown>(`
+      SELECT g.gift_name, g.diamond_count,
+             gc.coin_cost,
+             SUM(g.repeat_count) as total_sent,
+             SUM(g.diamond_count * g.repeat_count) as total_diamonds
+      FROM gifts g
+      LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
+      WHERE g.user_id = $1 AND g.event_type = 'gift'
+      GROUP BY g.gift_name, g.diamond_count, gc.coin_cost
+      ORDER BY total_diamonds DESC
+    `, [userId]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getGiftCatalogStats(): Promise<GiftCatalogRow[]> {
+  try {
+    return await query<GiftCatalogRow>(`
+      SELECT g.gift_name, g.diamond_count,
+             gc.coin_cost,
+             SUM(g.repeat_count) as total_sent,
+             SUM(g.diamond_count * g.repeat_count) as total_diamonds,
+             COUNT(DISTINCT g.user_id) as unique_senders
+      FROM gifts g
+      LEFT JOIN gift_catalog gc ON gc.gift_name = g.gift_name
+      WHERE g.event_type = 'gift'
+      GROUP BY g.gift_name, g.diamond_count, gc.coin_cost
+      ORDER BY total_diamonds DESC
+    `);
+  } catch {
+    return [];
+  }
+}
+
+export async function getTopVentanilla(username: string, limit = 10): Promise<VentanillaRankingRow[]> {
+  try {
+    return await query<VentanillaRankingRow>(`
+      SELECT g.user_id, g.username, g.nickname,
+             SUM(EXTRACT(EPOCH FROM (COALESCE(g.left_at, NOW()) - g.joined_at)))::int as total_seconds,
+             COUNT(*) as visit_count
+      FROM guests g
+      JOIN sessions s ON g.session_id = s.id
+      WHERE s.username = $1
+      GROUP BY g.user_id, g.username, g.nickname
+      ORDER BY total_seconds DESC
+      LIMIT $2
+    `, [username, limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getTopOpponents(username: string, limit = 10): Promise<OpponentRankingRow[]> {
+  try {
+    return await query<OpponentRankingRow>(`
+      SELECT bp_opp.username as opponent_username,
+             COUNT(*) as total_battles,
+             SUM(bp_opp.score) as total_opponent_score,
+             SUM(bp_host.score) as total_host_score,
+             SUM(CASE WHEN bp_host.score > bp_opp.score THEN 1 ELSE 0 END) as wins,
+             SUM(CASE WHEN bp_host.score < bp_opp.score THEN 1 ELSE 0 END) as losses
+      FROM battle_participants bp_host
+      JOIN battles_v2 bv ON bp_host.battle_id = bv.battle_id
+      JOIN battle_participants bp_opp ON bp_opp.battle_id = bv.battle_id AND bp_opp.user_id != bp_host.user_id
+      JOIN sessions s ON bp_host.session_id = s.id
+      WHERE s.username = $1
+      GROUP BY bp_opp.username
+      ORDER BY total_battles DESC
+      LIMIT $2
+    `, [username, limit]);
+  } catch {
+    return [];
+  }
+}
+
+// --- Chat analysis ---
+
+export async function getChatAnalysis(sessionId: number): Promise<ChatAnalysisRow | null> {
+  try {
+    return await queryOne<ChatAnalysisRow>(
+      "SELECT topics, summary FROM chat_analysis WHERE session_id = $1",
+      [sessionId],
+    );
+  } catch {
+    return null;
+  }
+}
+
+// --- Days page ---
+
+export async function getDays(): Promise<DayRow[]> {
+  return query<DayRow>(`
+    SELECT DATE(s.date) as day,
+           COUNT(*) as session_count,
+           COALESCE(SUM(s.duration_seconds), 0) as total_duration,
+           STRING_AGG(DISTINCT s.username, ',') as authors
+    FROM sessions s
+    GROUP BY DATE(s.date)
+    ORDER BY day DESC
+  `);
+}
+
+export async function getDayDetail(day: string): Promise<DayDetailRow[]> {
+  try {
+    return await query<DayDetailRow>(`
+      SELECT s.id as session_id, s.username, s.date, s.duration_seconds, s.summary,
+             ca.summary as chat_summary, ca.topics as chat_topics,
+             (SELECT COUNT(*) FROM battle_participants bp WHERE bp.session_id = s.id) as battle_count,
+             (SELECT COUNT(DISTINCT g.user_id) FROM guests g WHERE g.session_id = s.id) as guest_count,
+             (SELECT COUNT(*) FROM chat_messages cm WHERE cm.session_id = s.id) as chat_message_count,
+             (SELECT COUNT(*) FROM chunks c WHERE c.session_id = s.id) as chunk_count
+      FROM sessions s
+      LEFT JOIN chat_analysis ca ON ca.session_id = s.id
+      WHERE DATE(s.date) = $1
+      ORDER BY s.date
+    `, [day]);
+  } catch {
+    return [];
+  }
+}
+
+// --- Stats page ---
+
+export async function getTopByDuration(limit = 5): Promise<StatSessionRow[]> {
+  return query<StatSessionRow>(`
+    SELECT s.id as session_id, s.username, s.date,
+           COALESCE(s.duration_seconds, 0) as value
+    FROM sessions s
+    ORDER BY value DESC LIMIT $1
+  `, [limit]);
+}
+
+export async function getTopByGuests(limit = 5): Promise<StatSessionRow[]> {
+  try {
+    return await query<StatSessionRow>(`
+      SELECT s.id as session_id, s.username, s.date,
+             COUNT(DISTINCT g.user_id) as value
+      FROM sessions s
+      JOIN guests g ON g.session_id = s.id
+      GROUP BY s.id, s.username, s.date
+      ORDER BY value DESC LIMIT $1
+    `, [limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getTopByPoints(limit = 5): Promise<StatSessionRow[]> {
+  try {
+    return await query<StatSessionRow>(`
+      SELECT s.id as session_id, s.username, s.date,
+             SUM(bp.score) as value
+      FROM sessions s
+      JOIN battle_participants bp ON bp.session_id = s.id
+      GROUP BY s.id, s.username, s.date
+      ORDER BY value DESC LIMIT $1
+    `, [limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getTopByChatMessages(limit = 5): Promise<StatSessionRow[]> {
+  try {
+    return await query<StatSessionRow>(`
+      SELECT s.id as session_id, s.username, s.date,
+             COUNT(*) as value
+      FROM sessions s
+      JOIN chat_messages cm ON cm.session_id = s.id
+      GROUP BY s.id, s.username, s.date
+      ORDER BY value DESC LIMIT $1
+    `, [limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getTopByTranscriptDensity(limit = 5): Promise<StatSessionRow[]> {
+  try {
+    return await query<StatSessionRow>(`
+      SELECT s.id as session_id, s.username, s.date,
+             COUNT(*) as value
+      FROM sessions s
+      JOIN chunks c ON c.session_id = s.id
+      GROUP BY s.id, s.username, s.date
+      ORDER BY value DESC LIMIT $1
+    `, [limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getTopByBattles(limit = 5): Promise<StatSessionRow[]> {
+  try {
+    return await query<StatSessionRow>(`
+      SELECT s.id as session_id, s.username, s.date,
+             COUNT(*) as value
+      FROM sessions s
+      JOIN battle_participants bp ON bp.session_id = s.id
+      GROUP BY s.id, s.username, s.date
+      ORDER BY value DESC LIMIT $1
+    `, [limit]);
+  } catch {
+    return [];
+  }
+}
+
+export async function getTopByUniqueViewers(limit = 5): Promise<StatSessionRow[]> {
+  try {
+    return await query<StatSessionRow>(`
+      SELECT s.id as session_id, s.username, s.date,
+             COUNT(DISTINCT vj.user_id) as value
+      FROM sessions s
+      JOIN viewer_joins vj ON vj.session_id = s.id
+      GROUP BY s.id, s.username, s.date
+      ORDER BY value DESC LIMIT $1
+    `, [limit]);
+  } catch {
+    return [];
   }
 }

@@ -1,21 +1,21 @@
 import type { APIRoute } from "astro";
 import { getBattle, getBattleChatMessages, getLatestViewerJoin, isBattleActive } from "@/lib/db";
 
-export const GET: APIRoute = ({ params, url }) => {
+export const GET: APIRoute = async ({ params, url }) => {
   const id = Number(params.id);
   if (isNaN(id)) {
     return new Response(JSON.stringify({ error: "Invalid id" }), { status: 400 });
   }
 
-  const battle = getBattle(id);
+  const battle = await getBattle(id);
   if (!battle) {
     return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
   }
 
   const since = url.searchParams.get("since") || undefined;
-  const messages = getBattleChatMessages(battle.battle_id, since);
-  const active = isBattleActive(battle.battle_id);
-  const last_join = getLatestViewerJoin(battle.session_id);
+  const messages = await getBattleChatMessages(battle.battle_id, since);
+  const active = await isBattleActive(battle.battle_id);
+  const last_join = await getLatestViewerJoin(battle.session_id);
 
   return new Response(
     JSON.stringify({

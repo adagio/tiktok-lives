@@ -39,27 +39,27 @@ let latestJoin: { username: string; joined_at: string } | null = null;
 let error: string | null = null;
 
 try {
-  session = getSession(id);
+  session = await getSession(id);
   if (!session) {
     return Astro.redirect("/sesiones");
   }
-  chunks = getSessionChunks(id);
-  clips = getSessionClips(id);
-  battles = getSessionBattles(id);
-  guests = getSessionGuests(id);
+  chunks = await getSessionChunks(id);
+  clips = await getSessionClips(id);
+  battles = await getSessionBattles(id);
+  guests = await getSessionGuests(id);
 
   // Read chat messages (filter out legacy __join__ rows)
   try {
-    chatMessages = getSessionChatMessages(id).filter((m) => m.text !== "__join__");
-    chatActive = isSessionActive(id);
+    chatMessages = (await getSessionChatMessages(id)).filter((m) => m.text !== "__join__");
+    chatActive = await isSessionActive(id);
   } catch {
     // chat_messages table may not exist yet
   }
-  latestJoin = getLatestViewerJoin(id);
+  latestJoin = await getLatestViewerJoin(id);
 
   // Chat analysis (LLM-generated topics + summary)
   try {
-    const raw = getChatAnalysis(id);
+    const raw = await getChatAnalysis(id);
     if (raw) {
       chatAnalysis = { topics: JSON.parse(raw.topics), summary: raw.summary };
     }
@@ -69,7 +69,7 @@ try {
 
   // Read pre-computed topic scores
   try {
-    const rawScores = getSessionTopicScores(id);
+    const rawScores = await getSessionTopicScores(id);
     if (rawScores.length > 0) {
       topics = normalizeScores(
         rawScores.map((r) => ({ id: r.topic, rawScore: r.max_score })),

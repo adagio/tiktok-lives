@@ -10,10 +10,9 @@ Usage:
 
 import json
 import os
-import sqlite3
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -25,7 +24,9 @@ load_dotenv(REPO_ROOT / ".env")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DB_PATH = REPO_ROOT / "clips.db"
+sys.path.insert(0, str(REPO_ROOT / "libs"))
+from db import get_connection
+
 LOCAL_TZ = ZoneInfo(os.environ.get("DISPLAY_TZ", "UTC"))
 MAX_CHAT_CHARS = 50000
 
@@ -44,29 +45,13 @@ CHAT:
 
 
 # ---------------------------------------------------------------------------
-# Rate limit tracker (persisted in SQLite)
+# Rate limit tracker (persisted in PostgreSQL)
 # ---------------------------------------------------------------------------
-
-def _init_rate_log(conn: sqlite3.Connection):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS api_rate_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            provider TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            status TEXT NOT NULL,
-            delay_seconds REAL,
-            error_detail TEXT
-        )
-    """)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_rate_log_provider ON api_rate_log(provider, timestamp)"
-    )
-
 
 class RateLimiter:
     """Adaptive per-provider rate limiter. Learns from history in api_rate_log."""
 
-    def __init__(self, provider: str, conn: sqlite3.Connection, initial_delay: float = 2.0):
+    def __init__(self, provider: str, conn, initial_delay: float = 2.0):
         self.provider = provider
         self.conn = conn
         self.delay = initial_delay
@@ -79,12 +64,12 @@ class RateLimiter:
     def _load_history(self):
         recent_429 = self.conn.execute(
             "SELECT COUNT(*) FROM api_rate_log "
-            "WHERE provider = ? AND status = '429' AND timestamp > datetime('now', '-1 hour')",
+            "WHERE provider = %s AND status = '429' AND timestamp > NOW() - INTERVAL '1 hour'",
             (self.provider,),
         ).fetchone()[0]
         recent_ok = self.conn.execute(
             "SELECT COUNT(*) FROM api_rate_log "
-            "WHERE provider = ? AND status = 'ok' AND timestamp > datetime('now', '-10 minutes')",
+            "WHERE provider = %s AND status = 'ok' AND timestamp > NOW() - INTERVAL '10 minutes'",
             (self.provider,),
         ).fetchone()[0]
         if recent_429 > 5:
@@ -95,8 +80,8 @@ class RateLimiter:
     def _log(self, status: str, detail: str = ""):
         self.conn.execute(
             "INSERT INTO api_rate_log (provider, timestamp, status, delay_seconds, error_detail) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (self.provider, datetime.utcnow().isoformat(), status, self.delay, detail or None),
+            "VALUES (%s, %s, %s, %s, %s)",
+            (self.provider, datetime.now(timezone.utc), status, self.delay, detail or None),
         )
         self.conn.commit()
 
@@ -128,7 +113,7 @@ class RateLimiter:
             "SELECT COUNT(*), "
             "SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='429' THEN 1 ELSE 0 END) "
-            "FROM api_rate_log WHERE provider = ? AND timestamp > datetime('now', '-1 hour')",
+            "FROM api_rate_log WHERE provider = %s AND timestamp > NOW() - INTERVAL '1 hour'",
             (self.provider,),
         ).fetchone()
         return f"{row[1] or 0} ok / {row[2] or 0} rate-limited (last hour), delay={self.delay:.1f}s"
@@ -181,28 +166,23 @@ def _is_rate_limit(err: Exception) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Core: fetch pending, analyze one, save — no batching
+# Core helpers
 # ---------------------------------------------------------------------------
 
-def _get_pending(conn: sqlite3.Connection, force: bool, session_id: int | None) -> list[tuple]:
-    """Return list of (session_id, username, date) to process.
-
-    Each call queries the DB fresh, so concurrent writers can't cause dupes.
-    """
+def _get_pending(conn, force: bool, session_id: int | None) -> list[tuple]:
     if session_id:
-        base = (
+        rows = conn.execute(
             "SELECT DISTINCT cc.session_id, s.username, s.date "
             "FROM chat_chunks cc JOIN sessions s ON cc.session_id = s.id "
-            "WHERE cc.session_id = ?"
-        )
-        rows = conn.execute(base, (session_id,)).fetchall()
+            "WHERE cc.session_id = %s",
+            (session_id,),
+        ).fetchall()
     else:
-        base = (
+        rows = conn.execute(
             "SELECT DISTINCT cc.session_id, s.username, s.date "
             "FROM chat_chunks cc JOIN sessions s ON cc.session_id = s.id "
-            "ORDER BY s.date"
-        )
-        rows = conn.execute(base).fetchall()
+            "ORDER BY s.date",
+        ).fetchall()
 
     if force:
         return rows
@@ -211,9 +191,9 @@ def _get_pending(conn: sqlite3.Connection, force: bool, session_id: int | None) 
     return [r for r in rows if r[0] not in existing]
 
 
-def _get_chat_text(conn: sqlite3.Connection, session_id: int) -> str | None:
+def _get_chat_text(conn, session_id: int) -> str | None:
     chunks = conn.execute(
-        "SELECT text FROM chat_chunks WHERE session_id = ? ORDER BY start_time",
+        "SELECT text FROM chat_chunks WHERE session_id = %s ORDER BY start_time",
         (session_id,),
     ).fetchall()
     if not chunks:
@@ -222,19 +202,24 @@ def _get_chat_text(conn: sqlite3.Connection, session_id: int) -> str | None:
     return text[:MAX_CHAT_CHARS] if len(text) > MAX_CHAT_CHARS else text
 
 
-def _save_analysis(conn: sqlite3.Connection, session_id: int, result: dict, model: str):
+def _save_analysis(conn, session_id: int, result: dict, model: str):
     conn.execute(
-        "INSERT OR REPLACE INTO chat_analysis (session_id, topics, summary, model) VALUES (?, ?, ?, ?)",
+        "INSERT INTO chat_analysis (session_id, topics, summary, model) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (session_id) DO UPDATE SET topics = EXCLUDED.topics, summary = EXCLUDED.summary, model = EXCLUDED.model",
         (session_id, json.dumps(result["topics"], ensure_ascii=False), result["summary"], model),
     )
     conn.commit()
 
 
-def _to_local(iso_str: str) -> str:
+def _to_local(date_val) -> str:
     try:
-        return datetime.fromisoformat(iso_str).astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+        if isinstance(date_val, str):
+            dt = datetime.fromisoformat(date_val)
+        else:
+            dt = date_val
+        return dt.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
     except (ValueError, TypeError):
-        return iso_str[:16]
+        return str(date_val)[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -250,21 +235,10 @@ def main():
     parser.add_argument("--provider", choices=["gemini", "groq", "auto"], default="auto")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS chat_analysis (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER NOT NULL UNIQUE REFERENCES sessions(id),
-            topics TEXT NOT NULL, summary TEXT NOT NULL,
-            model TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_analysis_session ON chat_analysis(session_id)")
-    _init_rate_log(conn)
+    conn = get_connection()
 
     if args.force and args.session:
-        conn.execute("DELETE FROM chat_analysis WHERE session_id = ?", (args.session,))
+        conn.execute("DELETE FROM chat_analysis WHERE session_id = %s", (args.session,))
         conn.commit()
     elif args.force:
         conn.execute("DELETE FROM chat_analysis")
@@ -280,7 +254,6 @@ def main():
 
     limiters = {name: RateLimiter(name, conn, PROVIDERS[name][2]) for name in order}
 
-    # Get pending — fresh query each time we need it
     pending = _get_pending(conn, args.force, args.session)
     total = len(pending)
 
@@ -296,6 +269,8 @@ def main():
         print(f"    {name}: {limiters[name].stats_line()}", flush=True)
     print(f"{'='*60}\n", flush=True)
 
+    from pipeline_telemetry import log_event
+
     success = 0
     errors = 0
     skipped = 0
@@ -307,9 +282,8 @@ def main():
         elapsed = time.time() - t0
         eta = (elapsed / max(success + errors, 1)) * (total - done)
 
-        # Double-check not already analyzed (another process could have done it)
         already = conn.execute(
-            "SELECT 1 FROM chat_analysis WHERE session_id = ?", (session_id,)
+            "SELECT 1 FROM chat_analysis WHERE session_id = %s", (session_id,)
         ).fetchone()
         if already and not args.force:
             skipped += 1
@@ -339,7 +313,13 @@ def main():
                 analyzed = True
 
                 topics_preview = ", ".join(result["topics"][:3])
-                print(f"  {label} ✓ [{provider_name}] {topics_preview} (ETA {eta:.0f}s)", flush=True)
+                print(f"  {label} OK [{provider_name}] {topics_preview} (ETA {eta:.0f}s)", flush=True)
+
+                log_event(session_id, "analyze_chat", status="completed",
+                          elapsed_seconds=time.time() - t0 if idx == 0 else None,
+                          provider=provider_name,
+                          record_count=len(result.get("topics", [])),
+                          detail={"model": model, "topics": result.get("topics", [])})
 
                 limiter.wait()
                 break
@@ -347,27 +327,29 @@ def main():
             except json.JSONDecodeError as e:
                 limiter.record_error(str(e)[:200])
                 errors += 1
-                print(f"  {label} ✗ [{provider_name}] JSON parse error", flush=True)
-                break  # bad output, don't retry with another provider
+                log_event(session_id, "analyze_chat", status="error",
+                          provider=provider_name, detail={"error": "json_parse"})
+                print(f"  {label} FAIL [{provider_name}] JSON parse error", flush=True)
+                break
 
             except Exception as e:
                 if _is_rate_limit(e):
                     limiter.record_429(str(e)[:200])
-                    print(f"  {label} ⏸ [{provider_name}] rate limited → delay={limiter.delay:.0f}s", flush=True)
-                    # continue to next provider
+                    print(f"  {label} WAIT [{provider_name}] rate limited, delay={limiter.delay:.0f}s", flush=True)
                 else:
                     limiter.record_error(str(e)[:200])
                     errors += 1
-                    print(f"  {label} ✗ [{provider_name}] {str(e)[:80]}", flush=True)
+                    log_event(session_id, "analyze_chat", status="error",
+                              provider=provider_name, detail={"error": str(e)[:200]})
+                    print(f"  {label} FAIL [{provider_name}] {str(e)[:80]}", flush=True)
                     break
 
         if not analyzed and not already:
-            # All providers failed — wait for the best one and retry on next iteration
             healthy = [n for n in order if limiters[n].is_healthy]
             if not healthy:
                 best = min(order, key=lambda n: limiters[n].delay)
                 wait = limiters[best].delay
-                print(f"  ⏸ All providers exhausted. Waiting {wait:.0f}s for {best}...", flush=True)
+                print(f"  WAIT All providers exhausted. Waiting {wait:.0f}s for {best}...", flush=True)
                 time.sleep(wait)
                 limiters[best].consecutive_429 = 0
 

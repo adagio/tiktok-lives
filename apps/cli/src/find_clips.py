@@ -2,8 +2,6 @@
 
 import os
 import re
-import sqlite3
-import struct
 import subprocess
 import sys
 import unicodedata
@@ -21,7 +19,9 @@ load_dotenv(REPO_ROOT / ".env")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DB_PATH = REPO_ROOT / "clips.db"
+sys.path.insert(0, str(REPO_ROOT / "libs"))
+from db import get_connection
+
 CLIPS_DIR = REPO_ROOT / "clips"
 EMBEDDING_MODEL = "intfloat/multilingual-e5-large"
 FFMPEG = r"D:\bin\ffmpeg.exe"
@@ -37,10 +37,6 @@ def slugify(text: str) -> str:
     text = text.encode("ascii", "ignore").decode("ascii").lower()
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     return text[:50] or "clip"
-
-
-def blob_to_array(blob: bytes, dim: int) -> np.ndarray:
-    return np.array(struct.unpack(f"{dim}f", blob), dtype=np.float32)
 
 
 def format_time(seconds: float) -> str:
@@ -103,22 +99,37 @@ def extract_clip(ts_file: Path, start: float, duration: float, out_path: Path) -
 
 
 def search_chat(args) -> None:
-    """Search chat chunks by semantic similarity."""
-    conn = sqlite3.connect(str(DB_PATH))
+    """Search chat chunks by semantic similarity using pgvector."""
+    conn = get_connection()
+    from pgvector.psycopg import register_vector
+    register_vector(conn)
 
+    # Load model and embed query
+    print(f"Loading model ...", flush=True)
+    model = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(MODELS_DIR))
+    query_emb = model.encode(
+        f"query: {args.query}", normalize_embeddings=True,
+    )
+
+    # Use pgvector cosine distance
     query_sql = (
-        "SELECT cc.id, cc.start_time, cc.end_time, cc.text, cc.embedding, "
-        "cc.message_count, s.username, s.date, s.id "
+        "SELECT cc.id, cc.start_time, cc.end_time, cc.text, "
+        "cc.message_count, s.username, s.date, s.id, "
+        "cc.embedding <=> %s::vector AS distance "
         "FROM chat_chunks cc "
         "JOIN sessions s ON cc.session_id = s.id "
         "WHERE cc.embedding IS NOT NULL"
     )
-    if args.user:
-        query_sql += " AND s.username = ?"
-        rows = conn.execute(query_sql, (args.user,)).fetchall()
-    else:
-        rows = conn.execute(query_sql).fetchall()
+    params = [query_emb.tolist()]
 
+    if args.user:
+        query_sql += " AND s.username = %s"
+        params.append(args.user)
+
+    query_sql += " ORDER BY distance LIMIT %s"
+    params.append(args.max_clips)
+
+    rows = conn.execute(query_sql, params).fetchall()
     conn.close()
 
     if not rows:
@@ -126,46 +137,33 @@ def search_chat(args) -> None:
         print("Run index_chat.py first.")
         return
 
-    # Embed query
-    print(f"Loading model ...", flush=True)
-    model = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(MODELS_DIR))
-    query_emb = model.encode(
-        f"query: {args.query}", normalize_embeddings=True,
-    ).reshape(1, -1)
-
-    # Compute similarities
-    embeddings = np.stack([blob_to_array(row[4], dim=1024) for row in rows])
-    scores = (embeddings @ query_emb.T).flatten()
-
-    indices = np.argsort(scores)[::-1]
-
     print(f"\nQuery: \"{args.query}\"  |  Source: chat")
-    print(f"Searched {len(rows)} chat chunks\n")
+    print(f"Top {len(rows)} results\n")
     print("=" * 80)
 
     shown = 0
-    for idx in indices:
-        score = float(scores[idx])
+    for row in rows:
+        chunk_id, start_time, end_time, text, msg_count, username, date, session_id, distance = row
+        score = 1.0 - distance  # cosine similarity = 1 - cosine distance
+
         if score < args.min_score:
-            break
-        if shown >= args.max_clips:
-            break
+            continue
 
-        row = rows[idx]
-        chunk_id, start_time, end_time, text, _, msg_count, username, date, session_id = row
-
-        # Parse time for display
         try:
-            t_start = datetime.fromisoformat(start_time).strftime("%H:%M")
-            t_end = datetime.fromisoformat(end_time).strftime("%H:%M")
+            if isinstance(start_time, str):
+                t_start = datetime.fromisoformat(start_time).strftime("%H:%M")
+                t_end = datetime.fromisoformat(end_time).strftime("%H:%M")
+            else:
+                t_start = start_time.strftime("%H:%M")
+                t_end = end_time.strftime("%H:%M")
         except (ValueError, TypeError):
-            t_start = start_time[:16]
-            t_end = end_time[:16]
+            t_start = str(start_time)[:16]
+            t_end = str(end_time)[:16]
 
         shown += 1
-        print(f"\n#{shown}  Score: {score:.3f}  |  {username}/{date.split('T')[0]}")
+        date_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date).split("T")[0]
+        print(f"\n#{shown}  Score: {score:.3f}  |  {username}/{date_str}")
         print(f"  Time: {t_start} - {t_end}  |  {msg_count} messages")
-        # Show first 300 chars of chat
         snippet = text[:300].replace("\n", "\n  ")
         print(f"  Chat:\n  {snippet}")
         if len(text) > 300:
@@ -199,9 +197,6 @@ def main():
                         help="Search source: transcript (SRT chunks), chat (audience messages), or all (default: transcript)")
     args = parser.parse_args()
 
-    if not DB_PATH.exists():
-        sys.exit(f"Database not found: {DB_PATH}\nRun index_session.py first.")
-
     if args.source in ("chat", "all"):
         search_chat(args)
         if args.source == "chat":
@@ -210,43 +205,21 @@ def main():
         print("TRANSCRIPT RESULTS:")
         print("=" * 80)
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = get_connection()
+    from pgvector.psycopg import register_vector
+    register_vector(conn)
 
-    # Ensure clips table exists (migration for existing DBs)
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS clips (
-            id INTEGER PRIMARY KEY,
-            chunk_id INTEGER REFERENCES chunks(id),
-            session_id INTEGER REFERENCES sessions(id),
-            username TEXT NOT NULL,
-            query TEXT,
-            search_mode TEXT,
-            score REAL,
-            start_seconds REAL,
-            end_seconds REAL,
-            filename TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_clips_username ON clips(username);
-    """)
-
-    # Load chunks with session info
-    query_sql = (
-        "SELECT c.id, c.start_seconds, c.end_seconds, c.text, c.embedding, "
-        "c.embedding_audio, s.username, s.date, s.ts_path, s.srt_path, s.id "
-        "FROM chunks c JOIN sessions s ON c.session_id = s.id"
+    # Load model and embed query
+    print(f"Loading model ...", flush=True)
+    model = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(MODELS_DIR))
+    query_emb = model.encode(
+        f"query: {args.query}", normalize_embeddings=True,
     )
-    if args.user:
-        query_sql += " WHERE s.username = ?"
-        rows = conn.execute(query_sql, (args.user,)).fetchall()
-    else:
-        rows = conn.execute(query_sql).fetchall()
-
-    if not rows:
-        sys.exit("No indexed chunks found." + (f" (user={args.user})" if args.user else ""))
 
     # Check if audio embeddings are available
-    has_audio = any(row[5] is not None for row in rows)
+    has_audio = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM chunks WHERE embedding_audio IS NOT NULL)"
+    ).fetchone()[0]
 
     # Auto-detect mode
     mode = args.mode
@@ -257,123 +230,201 @@ def main():
         print("WARNING: No audio embeddings found. Falling back to text mode.", flush=True)
         mode = "text"
 
-    # --- Text scores ---
-    text_scores = None
-    if mode in ("text", "combined"):
-        text_embeddings = np.stack([blob_to_array(row[4], dim=1024) for row in rows])
-        print(f"Loading model ...", flush=True)
-        model = SentenceTransformer(EMBEDDING_MODEL, cache_folder=str(MODELS_DIR))
-        query_emb = model.encode(
-            f"query: {args.query}", normalize_embeddings=True,
-        ).reshape(1, -1)
-        text_scores = (text_embeddings @ query_emb.T).flatten()
-
-    # --- Audio scores ---
-    audio_scores = None
-    if mode in ("audio", "combined"):
-        print(f"Embedding query via Gemini ({GEMINI_MODEL}) ...", flush=True)
-        query_audio_emb = embed_query_gemini(args.query).reshape(1, -1)
-
-        audio_scores = np.zeros(len(rows), dtype=np.float32)
-        for i, row in enumerate(rows):
-            if row[5] is not None:
-                audio_emb = blob_to_array(row[5], dim=GEMINI_AUDIO_DIM)
-                audio_scores[i] = float(np.dot(audio_emb, query_audio_emb.flatten()))
-            else:
-                audio_scores[i] = text_scores[i] if text_scores is not None else 0.0
-
-    # --- Final scores ---
+    # For text-only mode, use pgvector directly
     if mode == "text":
-        scores = text_scores
-    elif mode == "audio":
-        scores = audio_scores
-    else:  # combined
-        w = args.audio_weight
-        scores = (1 - w) * text_scores + w * audio_scores
+        query_sql = (
+            "SELECT c.id, c.start_seconds, c.end_seconds, c.text, "
+            "s.username, s.date, s.ts_path, s.srt_path, s.id, "
+            "c.embedding <=> %s::vector AS distance "
+            "FROM chunks c JOIN sessions s ON c.session_id = s.id "
+            "WHERE c.embedding IS NOT NULL"
+        )
+        params = [query_emb.tolist()]
 
-    # Rank
-    indices = np.argsort(scores)[::-1]
+        if args.user:
+            query_sql += " AND s.username = %s"
+            params.append(args.user)
 
-    print(f"\nQuery: \"{args.query}\"  |  Mode: {mode}", end="")
-    if mode == "combined":
-        print(f"  |  Audio weight: {args.audio_weight}", end="")
-    print(f"\nSearched {len(rows)} chunks\n")
-    print("=" * 80)
+        query_sql += " ORDER BY distance LIMIT %s"
+        params.append(args.max_clips * 3)  # over-fetch to account for min-duration filter
 
-    shown = 0
-    extracted = 0
-    for idx in indices:
-        score = float(scores[idx])
-        if score < args.min_score:
-            break
-        if shown >= args.max_clips:
-            break
+        rows = conn.execute(query_sql, params).fetchall()
 
-        row = rows[idx]
-        chunk_id, start, end, text, _, _, username, date, ts_path, srt_name, session_id = row
-        duration = end - start
+        print(f"\nQuery: \"{args.query}\"  |  Mode: {mode}")
+        print(f"Searched chunks\n")
+        print("=" * 80)
 
-        if duration < args.min_duration:
-            continue
+        shown = 0
+        for row in rows:
+            chunk_id, start, end, text, username, date, ts_path, srt_name, session_id, distance = row
+            score = 1.0 - distance
+            duration = end - start
 
-        shown += 1
-        score_detail = f"Score: {score:.3f}"
-        if mode == "combined":
-            score_detail += f"  (text: {text_scores[idx]:.3f}, audio: {audio_scores[idx]:.3f})"
-        print(f"\n#{shown}  {score_detail}  |  {username}/{date}")
-        print(f"  Time: {format_time(start)} - {format_time(end)} ({duration:.0f}s)")
-        print(f"  Text: {text[:200]}")
+            if score < args.min_score or duration < args.min_duration:
+                continue
+            if shown >= args.max_clips:
+                break
 
-        # Clip boundaries with padding
-        clip_start = max(0, start - args.padding)
-        clip_duration = duration + 2 * args.padding
+            shown += 1
+            date_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date).split("T")[0]
+            print(f"\n#{shown}  Score: {score:.3f}  |  {username}/{date_str}")
+            print(f"  Time: {format_time(start)} - {format_time(end)} ({duration:.0f}s)")
+            print(f"  Text: {text[:200]}")
 
-        ts_file = resolve_ts_file(ts_path, srt_name)
+            clip_start = max(0, start - args.padding)
+            clip_duration = duration + 2 * args.padding
 
-        # Structured path: {username}/{date}/clip_{HHMMSS}_{query_slug}.mp4
-        date_str = date.split("T")[0] if "T" in date else date
-        query_slug = slugify(args.query)
-        time_tag = format_time(start).replace(":", "")
-        clip_filename = f"clip_{time_tag}_{query_slug}.mp4"
-        rel_path = f"{username}/{date_str}/{clip_filename}"
+            ts_file = resolve_ts_file(ts_path, srt_name)
+            query_slug = slugify(args.query)
+            time_tag = format_time(start).replace(":", "")
+            clip_filename = f"clip_{time_tag}_{query_slug}.mp4"
+            rel_path = f"{username}/{date_str}/{clip_filename}"
 
-        if args.extract:
-            out_path = CLIPS_DIR / username / date_str / clip_filename
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            if out_path.exists():
-                print(f"  Already exists: {out_path}")
-            else:
-                print(f"  Extracting: {out_path} ...", end=" ", flush=True)
-                if extract_clip(ts_file, clip_start, clip_duration, out_path):
-                    print("OK")
+            if args.extract:
+                out_path = CLIPS_DIR / username / date_str / clip_filename
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                if out_path.exists():
+                    print(f"  Already exists: {out_path}")
                 else:
-                    print("FAILED")
-                    continue
+                    print(f"  Extracting: {out_path} ...", end=" ", flush=True)
+                    if extract_clip(ts_file, clip_start, clip_duration, out_path):
+                        print("OK")
+                    else:
+                        print("FAILED")
+                        continue
 
-            # Save to DB (skip if same chunk+query already saved)
-            exists = conn.execute(
-                "SELECT id FROM clips WHERE chunk_id=? AND query=?",
-                (chunk_id, args.query),
-            ).fetchone()
-            if not exists:
-                conn.execute(
-                    "INSERT INTO clips (chunk_id, session_id, username, query, search_mode, "
-                    "score, start_seconds, end_seconds, filename) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (chunk_id, session_id, username, args.query, mode,
-                     score, clip_start, clip_start + clip_duration, rel_path),
-                )
-                conn.commit()
-            extracted += 1
+                exists = conn.execute(
+                    "SELECT id FROM clips WHERE chunk_id=%s AND query=%s",
+                    (chunk_id, args.query),
+                ).fetchone()
+                if not exists:
+                    conn.execute(
+                        "INSERT INTO clips (chunk_id, session_id, username, query, search_mode, "
+                        "score, start_seconds, end_seconds, filename) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (chunk_id, session_id, username, args.query, mode,
+                         score, clip_start, clip_start + clip_duration, rel_path),
+                    )
+                    conn.commit()
+            else:
+                print(f"  Output: clips/{rel_path}")
+                print(f"  ffmpeg: {FFMPEG} -ss {format_time(clip_start)} -i \"{ts_file}\" "
+                      f"-t {clip_duration:.0f} -c:v libx264 -c:a aac \"{clip_filename}\"")
+
+    else:
+        # Combined/audio mode — need to load embeddings into numpy for weighted scoring
+        query_sql = (
+            "SELECT c.id, c.start_seconds, c.end_seconds, c.text, c.embedding, "
+            "c.embedding_audio, s.username, s.date, s.ts_path, s.srt_path, s.id "
+            "FROM chunks c JOIN sessions s ON c.session_id = s.id "
+            "WHERE c.embedding IS NOT NULL"
+        )
+        if args.user:
+            query_sql += " AND s.username = %s"
+            rows = conn.execute(query_sql, (args.user,)).fetchall()
         else:
-            print(f"  Output: clips/{rel_path}")
-            print(f"  ffmpeg: {FFMPEG} -ss {format_time(clip_start)} -i \"{ts_file}\" "
-                  f"-t {clip_duration:.0f} -c:v libx264 -c:a aac \"{clip_filename}\"")
+            rows = conn.execute(query_sql).fetchall()
+
+        if not rows:
+            sys.exit("No indexed chunks found." + (f" (user={args.user})" if args.user else ""))
+
+        # Text scores
+        text_embeddings = np.array([np.array(row[4], dtype=np.float32) for row in rows])
+        text_scores = (text_embeddings @ query_emb.reshape(-1)).flatten()
+
+        # Audio scores
+        audio_scores = None
+        if mode in ("audio", "combined"):
+            print(f"Embedding query via Gemini ({GEMINI_MODEL}) ...", flush=True)
+            query_audio_emb = embed_query_gemini(args.query)
+
+            audio_scores = np.zeros(len(rows), dtype=np.float32)
+            for i, row in enumerate(rows):
+                if row[5] is not None:
+                    audio_emb = np.array(row[5], dtype=np.float32)
+                    audio_scores[i] = float(np.dot(audio_emb, query_audio_emb))
+                else:
+                    audio_scores[i] = text_scores[i]
+
+        # Final scores
+        if mode == "audio":
+            scores = audio_scores
+        else:  # combined
+            w = args.audio_weight
+            scores = (1 - w) * text_scores + w * audio_scores
+
+        indices = np.argsort(scores)[::-1]
+
+        print(f"\nQuery: \"{args.query}\"  |  Mode: {mode}", end="")
+        if mode == "combined":
+            print(f"  |  Audio weight: {args.audio_weight}", end="")
+        print(f"\nSearched {len(rows)} chunks\n")
+        print("=" * 80)
+
+        shown = 0
+        for idx in indices:
+            score = float(scores[idx])
+            if score < args.min_score or shown >= args.max_clips:
+                break
+
+            row = rows[idx]
+            chunk_id, start, end, text, _, _, username, date, ts_path, srt_name, session_id = row
+            duration = end - start
+
+            if duration < args.min_duration:
+                continue
+
+            shown += 1
+            score_detail = f"Score: {score:.3f}"
+            if mode == "combined":
+                score_detail += f"  (text: {text_scores[idx]:.3f}, audio: {audio_scores[idx]:.3f})"
+            date_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date).split("T")[0]
+            print(f"\n#{shown}  {score_detail}  |  {username}/{date_str}")
+            print(f"  Time: {format_time(start)} - {format_time(end)} ({duration:.0f}s)")
+            print(f"  Text: {text[:200]}")
+
+            clip_start = max(0, start - args.padding)
+            clip_duration = duration + 2 * args.padding
+            ts_file = resolve_ts_file(ts_path, srt_name)
+            query_slug = slugify(args.query)
+            time_tag = format_time(start).replace(":", "")
+            clip_filename = f"clip_{time_tag}_{query_slug}.mp4"
+            rel_path = f"{username}/{date_str}/{clip_filename}"
+
+            if args.extract:
+                out_path = CLIPS_DIR / username / date_str / clip_filename
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                if out_path.exists():
+                    print(f"  Already exists: {out_path}")
+                else:
+                    print(f"  Extracting: {out_path} ...", end=" ", flush=True)
+                    if extract_clip(ts_file, clip_start, clip_duration, out_path):
+                        print("OK")
+                    else:
+                        print("FAILED")
+                        continue
+
+                exists = conn.execute(
+                    "SELECT id FROM clips WHERE chunk_id=%s AND query=%s",
+                    (chunk_id, args.query),
+                ).fetchone()
+                if not exists:
+                    conn.execute(
+                        "INSERT INTO clips (chunk_id, session_id, username, query, search_mode, "
+                        "score, start_seconds, end_seconds, filename) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (chunk_id, session_id, username, args.query, mode,
+                         score, clip_start, clip_start + clip_duration, rel_path),
+                    )
+                    conn.commit()
+            else:
+                print(f"  Output: clips/{rel_path}")
+                print(f"  ffmpeg: {FFMPEG} -ss {format_time(clip_start)} -i \"{ts_file}\" "
+                      f"-t {clip_duration:.0f} -c:v libx264 -c:a aac \"{clip_filename}\"")
 
     print("\n" + "=" * 80)
     if shown == 0:
         print("No results above minimum score.")
     elif args.extract:
-        print(f"\n{extracted} clips extracted to {CLIPS_DIR}/")
+        print(f"\n{shown} clips extracted to {CLIPS_DIR}/")
     else:
         print(f"\n{shown} clips found. Use --extract to save them.")
 

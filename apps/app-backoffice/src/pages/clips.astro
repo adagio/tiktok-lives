@@ -23,10 +23,10 @@ let modes: string[] = [];
 let error: string | null = null;
 
 try {
-  clips = getClips(filters);
-  authors = getAuthors();
-  queries = getQueries();
-  modes = getModes();
+  clips = await getClips(filters);
+  authors = await getAuthors();
+  queries = await getQueries();
+  modes = await getModes();
 } catch (e) {
   error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
 }

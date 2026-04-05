@@ -5,7 +5,6 @@ Usage:
 """
 
 import os
-import sqlite3
 import subprocess
 import sys
 import time
@@ -20,17 +19,20 @@ load_dotenv(REPO_ROOT / ".env")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DB_PATH = REPO_ROOT / "clips.db"
+sys.path.insert(0, str(REPO_ROOT / "libs"))
+from db import get_connection
+
 FFMPEG = r"D:\bin\ffmpeg.exe"
 
 
-def extract_audio(ts_path: str) -> tuple[str, float, bool]:
-    """Extract audio from .ts to .opus. Returns (opus_path, elapsed_seconds, was_cached)."""
+def extract_audio(ts_path: str) -> tuple[str, float, bool, int, int]:
+    """Extract audio from .ts to .opus. Returns (opus_path, elapsed_seconds, was_cached, input_bytes, output_bytes)."""
     ts = Path(ts_path)
     opus_path = ts.with_name(ts.stem + "_audio.opus")
+    input_bytes = ts.stat().st_size
 
     if opus_path.exists() and opus_path.stat().st_size > 0:
-        return str(opus_path), 0.0, True
+        return str(opus_path), 0.0, True, input_bytes, opus_path.stat().st_size
 
     t0 = time.time()
     result = subprocess.run(
@@ -39,7 +41,8 @@ def extract_audio(ts_path: str) -> tuple[str, float, bool]:
     )
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr[-200:]}")
-    return str(opus_path), time.time() - t0, False
+    output_bytes = opus_path.stat().st_size if opus_path.exists() else 0
+    return str(opus_path), time.time() - t0, False, input_bytes, output_bytes
 
 
 def transcribe_audio(audio_path: str) -> str:
@@ -69,19 +72,18 @@ def index_session_srt(srt_path: str, session_dir: str):
     if result.returncode != 0:
         stderr_tail = result.stderr[-500:] if result.stderr else ""
         raise RuntimeError(f"index_session.py failed: {stderr_tail}")
-    # Print last few lines of output
     for line in (result.stdout.strip().split("\n") or [""])[-3:]:
         print(f"  {line}", flush=True)
 
 
-def _extract_audio_worker(args: tuple) -> tuple[int, str, str | None, float, bool, str | None]:
-    """Worker for parallel audio extraction. Returns (session_id, username, audio_path, elapsed, cached, error)."""
+def _extract_audio_worker(args: tuple) -> tuple[int, str, str | None, float, bool, int, int, str | None]:
+    """Worker for parallel audio extraction."""
     session_id, username, ts_path = args
     try:
-        audio_path, elapsed, cached = extract_audio(ts_path)
-        return (session_id, username, audio_path, elapsed, cached, None)
+        audio_path, elapsed, cached, input_bytes, output_bytes = extract_audio(ts_path)
+        return (session_id, username, audio_path, elapsed, cached, input_bytes, output_bytes, None)
     except Exception as e:
-        return (session_id, username, None, 0.0, False, str(e))
+        return (session_id, username, None, 0.0, False, 0, 0, str(e))
 
 
 def main():
@@ -90,32 +92,40 @@ def main():
     parser = argparse.ArgumentParser(description="Process recorded sessions: audio → transcribe → index")
     parser.add_argument("--date", help="Filter by date (e.g. 2026-03-24)")
     parser.add_argument("--session", type=int, help="Process only this session ID")
+    parser.add_argument("--user", help="Filter by username (e.g. alejandra_blankita)")
     parser.add_argument("--parallel", type=int, default=4, help="Parallel workers for audio extraction (default: 4)")
     parser.add_argument("--audio-only", action="store_true", help="Only extract audio, skip transcription and indexing")
     args = parser.parse_args()
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = get_connection()
 
     # Find sessions with recordings but no chunks
     if args.session:
         sessions = conn.execute(
             "SELECT s.id, s.username, s.date, s.ts_path FROM sessions s "
-            "WHERE s.id = ? AND s.ts_path != '' AND s.ts_path IS NOT NULL",
+            "WHERE s.id = %s AND s.ts_path != '' AND s.ts_path IS NOT NULL",
             (args.session,),
         ).fetchall()
     elif args.date:
         sessions = conn.execute(
             "SELECT s.id, s.username, s.date, s.ts_path FROM sessions s "
-            "WHERE s.date LIKE ? AND s.ts_path != '' AND s.ts_path IS NOT NULL "
+            "WHERE s.date::text LIKE %s AND s.ts_path != '' AND s.ts_path IS NOT NULL "
             "ORDER BY s.date",
             (f"{args.date}%",),
         ).fetchall()
     else:
+        user_filter = ""
+        params: list = []
+        if args.user:
+            user_filter = "AND s.username = %s "
+            params = [args.user]
         sessions = conn.execute(
             "SELECT s.id, s.username, s.date, s.ts_path FROM sessions s "
             "WHERE s.ts_path != '' AND s.ts_path IS NOT NULL "
             "AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.session_id = s.id) "
+            + user_filter +
             "ORDER BY s.date",
+            params,
         ).fetchall()
 
     conn.close()
@@ -141,6 +151,8 @@ def main():
     print(f"  Phase 1: Audio extraction — {total} sessions, {workers} workers", flush=True)
     print(f"{'='*60}\n", flush=True)
 
+    from pipeline_telemetry import log_event
+
     audio_results: dict[int, str] = {}  # session_id -> audio_path
     extract_args = [(sid, user, ts) for sid, user, _, ts in valid_sessions]
 
@@ -150,7 +162,7 @@ def main():
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_extract_audio_worker, a): a for a in extract_args}
         for i, future in enumerate(as_completed(futures)):
-            sid, username, audio_path, elapsed, was_cached, error = future.result()
+            sid, username, audio_path, elapsed, was_cached, input_bytes, output_bytes, error = future.result()
             done = i + 1
             pct = done * 100 // total
             elapsed_total = time.time() - t0
@@ -158,22 +170,29 @@ def main():
 
             if error:
                 errors += 1
-                print(f"  [{done}/{total}] {pct}% ✗ #{sid} @{username} — {error}", flush=True)
+                log_event(sid, "audio_extract", status="error",
+                          elapsed_seconds=elapsed, input_bytes=input_bytes,
+                          detail={"error": error})
+                print(f"  [{done}/{total}] {pct}% FAIL #{sid} @{username} — {error}", flush=True)
             elif was_cached:
                 cached += 1
                 audio_results[sid] = audio_path
-                print(f"  [{done}/{total}] {pct}% ● #{sid} @{username} — cached", flush=True)
+                log_event(sid, "audio_extract", status="cached",
+                          elapsed_seconds=0, input_bytes=input_bytes, output_bytes=output_bytes)
+                print(f"  [{done}/{total}] {pct}% CACHED #{sid} @{username}", flush=True)
             else:
                 audio_results[sid] = audio_path
-                print(f"  [{done}/{total}] {pct}% ✓ #{sid} @{username} — {elapsed:.0f}s (ETA {eta:.0f}s)", flush=True)
+                log_event(sid, "audio_extract", status="completed",
+                          elapsed_seconds=elapsed, input_bytes=input_bytes, output_bytes=output_bytes)
+                print(f"  [{done}/{total}] {pct}% OK #{sid} @{username} — {elapsed:.0f}s (ETA {eta:.0f}s)", flush=True)
 
     elapsed_phase1 = time.time() - t0
     print(f"\n  Audio: {len(audio_results)} ok, {cached} cached, {errors} errors — {elapsed_phase1:.0f}s total\n", flush=True)
 
     # Update audio_path in DB for extracted files
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = get_connection()
     for sid, audio_path in audio_results.items():
-        conn.execute("UPDATE sessions SET audio_path = ? WHERE id = ? AND (audio_path IS NULL OR audio_path = '')", (audio_path, sid))
+        conn.execute("UPDATE sessions SET audio_path = %s WHERE id = %s AND (audio_path IS NULL OR audio_path = '')", (audio_path, sid))
     conn.commit()
     conn.close()
     print(f"  Updated {len(audio_results)} sessions with audio_path in DB\n", flush=True)
@@ -202,14 +221,23 @@ def main():
 
         try:
             audio_path = audio_results[session_id]
-            srt_path = transcribe_audio(audio_path)
+
+            from pipeline_telemetry import track_step
+            with track_step(session_id, "transcribe") as t:
+                srt_path = transcribe_audio(audio_path)
+                srt_size = Path(srt_path).stat().st_size if Path(srt_path).exists() else 0
+                t["input_bytes"] = Path(audio_path).stat().st_size
+                t["output_bytes"] = srt_size
+
             session_dir = str(Path(ts_path).parent)
-            index_session_srt(srt_path, session_dir)
+            with track_step(session_id, "index_session") as t:
+                index_session_srt(srt_path, session_dir)
+
             ok += 1
-            print(f"    ✓ done (ETA {eta:.0f}s)\n", flush=True)
+            print(f"    OK done (ETA {eta:.0f}s)\n", flush=True)
         except Exception as e:
             errs += 1
-            print(f"    ✗ {e}\n", flush=True)
+            print(f"    FAIL {e}\n", flush=True)
 
     elapsed_phase2 = time.time() - t0
     print(f"\n{'='*60}", flush=True)

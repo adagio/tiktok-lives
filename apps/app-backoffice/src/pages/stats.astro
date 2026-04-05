@@ -18,7 +18,7 @@ const sections: { title: string; emoji: string; rows: StatSessionRow[]; format: 
   {
     title: "Mayor duracion",
     emoji: "\u{23F1}",
-    rows: getTopByDuration(),
+    rows: await getTopByDuration(),
     format: (v) => {
       const h = Math.floor(v / 3600);
       const m = Math.floor((v % 3600) / 60);
@@ -29,42 +29,42 @@ const sections: { title: string; emoji: string; rows: StatSessionRow[]; format: 
   {
     title: "Mas guests en ventanilla",
     emoji: "\u{1F399}",
-    rows: getTopByGuests(),
+    rows: await getTopByGuests(),
     format: (v) => v.toLocaleString(),
     unit: "guests",
   },
   {
     title: "Mas puntos en batallas",
     emoji: "\u{2694}",
-    rows: getTopByPoints(),
+    rows: await getTopByPoints(),
     format: (v) => v.toLocaleString(),
     unit: "pts",
   },
   {
     title: "Mas mensajes de chat",
     emoji: "\u{1F4AC}",
-    rows: getTopByChatMessages(),
+    rows: await getTopByChatMessages(),
     format: (v) => v.toLocaleString(),
     unit: "msgs",
   },
   {
     title: "Mayor densidad de transcripcion",
     emoji: "\u{1F4DD}",
-    rows: getTopByTranscriptDensity(),
+    rows: await getTopByTranscriptDensity(),
     format: (v) => v.toLocaleString(),
     unit: "chunks",
   },
   {
     title: "Mas batallas",
     emoji: "\u{1F525}",
-    rows: getTopByBattles(),
+    rows: await getTopByBattles(),
     format: (v) => v.toLocaleString(),
     unit: "batallas",
   },
   {
     title: "Mas viewers unicos",
     emoji: "\u{1F465}",
-    rows: getTopByUniqueViewers(),
+    rows: await getTopByUniqueViewers(),
     format: (v) => v.toLocaleString(),
     unit: "viewers",
   },

@@ -15,8 +15,8 @@ let authors: string[] = [];
 let error: string | null = null;
 
 try {
-  sessions = getSessions(author || undefined, statusFilter || undefined);
-  authors = getSessionAuthors();
+  sessions = await getSessions(author || undefined, statusFilter || undefined);
+  authors = await getSessionAuthors();
 } catch (e) {
   error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
 }

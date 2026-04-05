@@ -20,15 +20,15 @@ let authorExists = false;
 
 try {
   // Check author exists
-  const authors = getAuthorList();
+  const authors = await getAuthorList();
   authorExists = authors.some((a) => a.username === username);
   if (!authorExists) {
     return Astro.redirect("/autores");
   }
-  rows = getAuthorDailySummary(username);
-  topDonors = getTopDonors(username);
-  topVentanilla = getTopVentanilla(username);
-  topOpponents = getTopOpponents(username);
+  rows = await getAuthorDailySummary(username);
+  topDonors = await getTopDonors(username);
+  topVentanilla = await getTopVentanilla(username);
+  topOpponents = await getTopOpponents(username);
 } catch (e) {
   error = e instanceof Error ? e.message : "Error al cargar datos del autor";
 }

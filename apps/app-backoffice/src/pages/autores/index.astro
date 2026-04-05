@@ -9,7 +9,7 @@ let authors: AuthorListRow[] = [];
 let error: string | null = null;
 
 try {
-  authors = getAuthorList();
+  authors = await getAuthorList();
 } catch (e) {
   error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
 }

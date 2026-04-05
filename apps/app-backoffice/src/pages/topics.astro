@@ -14,7 +14,7 @@ import { TOPIC_META, TOPIC_IDS, normalizeScores } from "@/lib/topics";
 import type { TopicScore } from "@/lib/topics";
 
 let globalTopics: TopicScore[] = [];
-let heatmapData: ReturnType<typeof getHeatmapData> = [];
+let heatmapData: Awaited<ReturnType<typeof getHeatmapData>> = [];
 let highlights: Record<string, TopicHighlightRow[]> = {};
 let error: string | null = null;
 
@@ -29,13 +29,13 @@ const topicHexColors: Record<string, string> = {
 };
 
 try {
-  const rawScores = getGlobalTopicScores();
+  const rawScores = await getGlobalTopicScores();
   globalTopics = normalizeScores(
     rawScores.map((r) => ({ id: r.topic, rawScore: r.max_score })),
   );
-  heatmapData = getHeatmapData();
+  heatmapData = await getHeatmapData();
   for (const tid of TOPIC_IDS) {
-    highlights[tid] = getTopicHighlights(tid, 5);
+    highlights[tid] = await getTopicHighlights(tid, 5);
   }
 } catch (e) {
   error = e instanceof Error ? e.message : "Error al cargar datos de topics";

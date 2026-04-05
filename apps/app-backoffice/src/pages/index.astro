@@ -16,10 +16,10 @@ let globalTopics: TopicScore[] = [];
 let error: string | null = null;
 
 try {
-  stats = getStats();
-  recentClips = getClips({ limit: 10 });
+  stats = await getStats();
+  recentClips = await getClips({ limit: 10 });
   try {
-    const rawScores = getGlobalTopicScores();
+    const rawScores = await getGlobalTopicScores();
     globalTopics = normalizeScores(
       rawScores.map((r) => ({ id: r.topic, rawScore: r.max_score })),
     );

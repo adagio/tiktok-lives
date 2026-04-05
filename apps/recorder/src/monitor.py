@@ -37,12 +37,13 @@ from recording import AdoptedProcess, check_is_live, start_recording
 from treasure_spy import TreasureSpy
 from ventanilla_spy import VentanillaSpy
 
-WATCHLIST_PATH = Path(__file__).resolve().parent.parent / "watchlist.json"
 LOG_PATH = Path(__file__).resolve().parent.parent / "monitor.log"
 HEARTBEAT_PATH = Path(__file__).resolve().parent.parent / "monitor.heartbeat"
 LOCK_PATH = Path(__file__).resolve().parent.parent / "monitor.lock"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DB_PATH = str(REPO_ROOT / "clips.db")
+
+sys.path.insert(0, str(REPO_ROOT / "libs"))
 BACKUP_DIR = REPO_ROOT / "backups"
 BACKUP_INTERVAL = 3600  # seconds (1 hour)
 BACKUP_KEEP = 4  # number of recent backups to keep
@@ -130,12 +131,20 @@ class Monitor:
 
     def _load_watchlist(self) -> tuple[int, list[dict]]:
         try:
-            data = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
-            interval = data.get("poll_interval_seconds", 90)
-            users = [u for u in data.get("users", []) if u.get("enabled", True)]
+            from db import get_connection
+            conn = get_connection()
+            rows = conn.execute(
+                "SELECT username, enabled, record, poll_interval_seconds "
+                "FROM watchlist WHERE enabled = true ORDER BY id"
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return 90, []
+            interval = rows[0][3]  # use first row's interval
+            users = [{"username": r[0], "enabled": True, "record": r[2]} for r in rows]
             return interval, users
-        except (json.JSONDecodeError, FileNotFoundError) as e:
-            log.error("Failed to load watchlist: %s", e)
+        except Exception as e:
+            log.error("Failed to load watchlist from PG: %s", e)
             return 90, []
 
     def _record_failure(self, username: str):
@@ -462,12 +471,18 @@ class Monitor:
             if is_new:
                 opponent_handle = opp_handle
                 try:
-                    save_battle(DB_PATH, sess.session_id, battle_id, opp_handle, opp_uid, host_score, opp_score)
+                    save_battle(
+                        DB_PATH, sess.session_id, battle_id,
+                        opp_handle, opp_uid, host_score, opp_score,
+                        host_username=username, host_user_id=host_uid,
+                    )
                 except Exception:
                     log.warning("Failed to save battle to DB", exc_info=True)
             else:
                 try:
-                    update_battle_scores(DB_PATH, battle_id, opp_uid, host_score, opp_score)
+                    if host_uid:
+                        update_battle_scores(DB_PATH, battle_id, host_uid, host_score)
+                    update_battle_scores(DB_PATH, battle_id, opp_uid, opp_score)
                 except Exception:
                     log.debug("Failed to update battle scores", exc_info=True)
 

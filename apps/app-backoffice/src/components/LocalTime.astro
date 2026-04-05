@@ -1,11 +1,14 @@
 ---
 interface Props {
-  utc: string | null | undefined;
+  utc: string | Date | null | undefined;
   fmt?: "date" | "time" | "datetime";
   class?: string;
 }
 
-const { utc, fmt = "datetime", class: className } = Astro.props;
+const { utc: rawUtc, fmt = "datetime", class: className } = Astro.props;
+
+// Normalize: PG returns Date objects, SQLite returned strings
+const utc = rawUtc instanceof Date ? rawUtc.toISOString() : rawUtc;
 
 // Build a legible UTC fallback
 let fallback = "—";

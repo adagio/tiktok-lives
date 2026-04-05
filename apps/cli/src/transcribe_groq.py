@@ -205,20 +205,18 @@ def transcribe(audio_path: str, provider: str = "auto") -> None:
 
     t0 = time.time()
 
-    if provider == "auto":
-        # Try Groq first, fallback to AssemblyAI on rate limit
-        try:
+    if provider in ("auto", "groq", "assemblyai"):
+        if provider == "auto":
+            # Use smart dispatcher with failover
+            from transcription_dispatcher import TranscriptionDispatcher
+            dispatcher = TranscriptionDispatcher()
+            all_segments, used_provider = dispatcher.transcribe(audio_path)
+        elif provider == "groq":
             all_segments = transcribe_via_groq(audio_path)
-        except RuntimeError as e:
-            if "rate_limit" in str(e).lower() or "retries" in str(e).lower() or "429" in str(e):
-                print(f"  Groq failed ({e}), switching to AssemblyAI...", flush=True)
-                all_segments = transcribe_via_assemblyai(audio_path)
-            else:
-                raise
-    elif provider == "groq":
-        all_segments = transcribe_via_groq(audio_path)
-    elif provider == "assemblyai":
-        all_segments = transcribe_via_assemblyai(audio_path)
+            used_provider = "groq"
+        else:
+            all_segments = transcribe_via_assemblyai(audio_path)
+            used_provider = "assemblyai"
     else:
         sys.exit(f"Unknown provider: {provider}")
 
@@ -235,6 +233,21 @@ def transcribe(audio_path: str, provider: str = "auto") -> None:
     elapsed = time.time() - t0
     duration = all_segments[-1]["end"] if all_segments else 0
     speed = duration / elapsed if elapsed > 0 else 0
+
+    # Telemetry
+    try:
+        from pipeline_telemetry import log_event
+        log_event(
+            session_id=None, phase="transcribe",
+            status="completed", elapsed_seconds=elapsed,
+            input_bytes=file_size,
+            output_bytes=srt_path.stat().st_size if srt_path.exists() else 0,
+            record_count=len(all_segments),
+            provider=used_provider,
+            detail={"audio_duration": duration, "speed_x": round(speed, 1)},
+        )
+    except Exception:
+        pass
 
     print(f"\nDone! {len(all_segments)} segments in {elapsed:.1f}s ({speed:.0f}x realtime)", flush=True)
     print(f"SRT: {srt_path}", flush=True)

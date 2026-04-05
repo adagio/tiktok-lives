@@ -1,14 +1,12 @@
 """Index a TikTok live session for clip discovery.
 
 Parses an SRT file, groups segments into ~30s chunks,
-embeds each chunk with multilingual-e5-large, and stores in SQLite.
+embeds each chunk with multilingual-e5-large, and stores in PostgreSQL with pgvector.
 Optionally embeds audio chunks via Gemini embedding-2 (--audio flag).
 """
 
 import os
 import re
-import sqlite3
-import struct
 import subprocess
 import sys
 import tempfile
@@ -26,7 +24,9 @@ load_dotenv(REPO_ROOT / ".env")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DB_PATH = REPO_ROOT / "clips.db"
+sys.path.insert(0, str(REPO_ROOT / "libs"))
+from db import get_connection
+
 EMBEDDING_MODEL = "intfloat/multilingual-e5-large"
 CHUNK_TARGET_SECONDS = 30.0
 # Pause longer than this (seconds) forces a chunk boundary
@@ -116,13 +116,6 @@ def group_into_chunks(segments: list[dict]) -> list[dict]:
     return chunks
 
 
-# --- Embedding ---
-
-def embed_to_blob(vec: np.ndarray) -> bytes:
-    """Pack float32 numpy array to bytes."""
-    return struct.pack(f"{len(vec)}f", *vec.tolist())
-
-
 # --- Audio extraction ---
 
 def extract_audio_chunk(audio_path: Path, start: float, duration: float, tmp_dir: str) -> Path:
@@ -165,7 +158,7 @@ def embed_audio_chunks(chunks: list[dict], audio_path: Path):
                 audio_bytes = audio_file.read_bytes()
             except subprocess.CalledProcessError as e:
                 print(f"  WARNING: ffmpeg failed for chunk {i} ({start:.1f}s), skipping audio embedding", flush=True)
-                chunk["embedding_audio_blob"] = None
+                chunk["embedding_audio"] = None
                 continue
 
             try:
@@ -181,10 +174,10 @@ def embed_audio_chunks(chunks: list[dict], audio_path: Path):
                 norm = np.linalg.norm(vec)
                 if norm > 0:
                     vec = vec / norm
-                chunk["embedding_audio_blob"] = embed_to_blob(vec)
+                chunk["embedding_audio"] = vec
             except Exception as e:
                 print(f"  WARNING: Gemini API failed for chunk {i}: {e}", flush=True)
-                chunk["embedding_audio_blob"] = None
+                chunk["embedding_audio"] = None
                 continue
 
             # Clean up temp file
@@ -201,131 +194,77 @@ def embed_audio_chunks(chunks: list[dict], audio_path: Path):
 
 # --- Database ---
 
-def init_db(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY,
-            username TEXT NOT NULL,
-            date TEXT NOT NULL,
-            ts_path TEXT,
-            srt_path TEXT,
-            audio_path TEXT,
-            duration_seconds REAL,
-            indexed_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY,
-            session_id INTEGER REFERENCES sessions(id),
-            chunk_index INTEGER,
-            start_seconds REAL,
-            end_seconds REAL,
-            text TEXT,
-            embedding BLOB,
-            embedding_model TEXT DEFAULT 'intfloat/multilingual-e5-large',
-            embedding_audio BLOB,
-            embedding_audio_model TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_chunks_session ON chunks(session_id);
-        CREATE INDEX IF NOT EXISTS idx_sessions_user_date ON sessions(username, date);
-
-        CREATE TABLE IF NOT EXISTS clips (
-            id INTEGER PRIMARY KEY,
-            chunk_id INTEGER REFERENCES chunks(id),
-            session_id INTEGER REFERENCES sessions(id),
-            username TEXT NOT NULL,
-            query TEXT,
-            search_mode TEXT,
-            score REAL,
-            start_seconds REAL,
-            end_seconds REAL,
-            filename TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_clips_username ON clips(username);
-    """)
-
-    # Migration: add audio columns if missing (existing DBs)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
-    if "embedding_audio" not in cols:
-        conn.execute("ALTER TABLE chunks ADD COLUMN embedding_audio BLOB")
-    if "embedding_audio_model" not in cols:
-        conn.execute("ALTER TABLE chunks ADD COLUMN embedding_audio_model TEXT")
-
-    return conn
-
-
-def session_exists(conn: sqlite3.Connection, username: str, date: str, srt_path: str) -> bool:
+def session_exists(conn, username: str, date: str, srt_path: str) -> bool:
     row = conn.execute(
-        "SELECT id FROM sessions WHERE username=? AND date=? AND srt_path=?",
+        "SELECT id FROM sessions WHERE username=%s AND date=%s AND srt_path=%s",
         (username, date, srt_path),
     ).fetchone()
     return row is not None
 
 
-def find_monitor_session(conn: sqlite3.Connection, username: str, date: str) -> int | None:
+def find_monitor_session(conn, username: str, date: str) -> int | None:
     """Find a session created by monitor (srt_path IS NULL) for the same username and date prefix."""
     row = conn.execute(
-        "SELECT id FROM sessions WHERE username=? AND date LIKE ? AND srt_path IS NULL ORDER BY date DESC LIMIT 1",
+        "SELECT id FROM sessions WHERE username=%s AND date::text LIKE %s AND srt_path IS NULL ORDER BY date DESC LIMIT 1",
         (username, date[:10] + "%"),
     ).fetchone()
     return row[0] if row else None
 
 
-def update_session(conn: sqlite3.Connection, session_id: int,
+def update_session(conn, session_id: int,
                    session_dir: Path, srt_name: str, duration: float) -> None:
     """Update a monitor-created session with SRT info."""
     conn.execute(
-        "UPDATE sessions SET ts_path=?, srt_path=?, duration_seconds=? WHERE id=?",
+        "UPDATE sessions SET ts_path=%s, srt_path=%s, duration_seconds=%s WHERE id=%s",
         (str(session_dir), srt_name, duration, session_id),
     )
     conn.commit()
 
 
-def insert_session(conn: sqlite3.Connection, username: str, date: str,
+def insert_session(conn, username: str, date: str,
                    session_dir: Path, srt_name: str, duration: float) -> int:
     cur = conn.execute(
-        "INSERT INTO sessions (username, date, ts_path, srt_path, duration_seconds) VALUES (?,?,?,?,?)",
+        "INSERT INTO sessions (username, date, ts_path, srt_path, duration_seconds) VALUES (%s,%s,%s,%s,%s) RETURNING id",
         (username, date, str(session_dir), srt_name, duration),
     )
+    row_id = cur.fetchone()[0]
     conn.commit()
-    return cur.lastrowid
+    return row_id
 
 
-def insert_chunks(conn: sqlite3.Connection, session_id: int, chunks: list[dict]):
-    conn.executemany(
-        "INSERT INTO chunks (session_id, chunk_index, start_seconds, end_seconds, text, "
-        "embedding, embedding_audio, embedding_audio_model) VALUES (?,?,?,?,?,?,?,?)",
-        [
+def insert_chunks(conn, session_id: int, chunks: list[dict]):
+    from pgvector.psycopg import register_vector
+    register_vector(conn)
+
+    for i, c in enumerate(chunks):
+        conn.execute(
+            "INSERT INTO chunks (session_id, chunk_index, start_seconds, end_seconds, text, "
+            "embedding, embedding_audio, embedding_audio_model) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
             (
                 session_id, i, c["start"], c["end"], c["text"],
-                c["embedding_blob"],
-                c.get("embedding_audio_blob"),
-                GEMINI_MODEL if c.get("embedding_audio_blob") else None,
-            )
-            for i, c in enumerate(chunks)
-        ],
-    )
+                c["embedding_vec"],
+                c.get("embedding_audio"),
+                GEMINI_MODEL if c.get("embedding_audio") is not None else None,
+            ),
+        )
     conn.commit()
 
 
-def update_audio_embeddings(conn: sqlite3.Connection, session_id: int, chunks: list[dict]):
+def update_audio_embeddings(conn, session_id: int, chunks: list[dict]):
     """Update existing chunks with audio embeddings (for re-indexing audio only)."""
+    from pgvector.psycopg import register_vector
+    register_vector(conn)
+
     rows = conn.execute(
-        "SELECT id, chunk_index FROM chunks WHERE session_id=? ORDER BY chunk_index",
+        "SELECT id, chunk_index FROM chunks WHERE session_id=%s ORDER BY chunk_index",
         (session_id,),
     ).fetchall()
     for db_id, chunk_idx in rows:
         if chunk_idx < len(chunks):
-            blob = chunks[chunk_idx].get("embedding_audio_blob")
+            emb = chunks[chunk_idx].get("embedding_audio")
             conn.execute(
-                "UPDATE chunks SET embedding_audio=?, embedding_audio_model=? WHERE id=?",
-                (blob, GEMINI_MODEL if blob else None, db_id),
+                "UPDATE chunks SET embedding_audio=%s, embedding_audio_model=%s WHERE id=%s",
+                (emb, GEMINI_MODEL if emb is not None else None, db_id),
             )
     conn.commit()
 
@@ -371,8 +310,8 @@ def main():
     else:
         date = date_str
 
-    # Init DB
-    conn = init_db(DB_PATH)
+    # Connect to PG
+    conn = get_connection()
 
     if not args.force and session_exists(conn, username, date, args.srt):
         print(f"Session already indexed: {username}/{date}/{args.srt}")
@@ -383,12 +322,12 @@ def main():
     # If forcing, delete old session data
     if args.force:
         row = conn.execute(
-            "SELECT id FROM sessions WHERE username=? AND date=? AND srt_path=?",
+            "SELECT id FROM sessions WHERE username=%s AND date=%s AND srt_path=%s",
             (username, date, args.srt),
         ).fetchone()
         if row:
-            conn.execute("DELETE FROM chunks WHERE session_id=?", (row[0],))
-            conn.execute("DELETE FROM sessions WHERE id=?", (row[0],))
+            conn.execute("DELETE FROM chunks WHERE session_id=%s", (row[0],))
+            conn.execute("DELETE FROM sessions WHERE id=%s", (row[0],))
             conn.commit()
             print(f"Deleted previous index for {username}/{date}/{args.srt}")
 
@@ -419,14 +358,14 @@ def main():
     print(f"  {len(chunks)} chunks embedded in {time.time() - t0:.1f}s", flush=True)
 
     for chunk, emb in zip(chunks, embeddings):
-        chunk["embedding_blob"] = embed_to_blob(emb)
+        chunk["embedding_vec"] = emb  # numpy array, pgvector handles conversion
 
     # Audio embeddings (optional)
     if audio_path:
         print(f"\nEmbedding audio chunks via Gemini ({GEMINI_MODEL}) ...", flush=True)
         t0 = time.time()
         embed_audio_chunks(chunks, audio_path)
-        audio_count = sum(1 for c in chunks if c.get("embedding_audio_blob"))
+        audio_count = sum(1 for c in chunks if c.get("embedding_audio") is not None)
         print(f"  {audio_count}/{len(chunks)} audio embeddings in {time.time() - t0:.1f}s", flush=True)
 
     # Store — check if monitor already created a session for this date
@@ -442,9 +381,9 @@ def main():
     conn.close()
 
     print(f"\nIndexed: {username}/{date}/{args.srt}")
-    print(f"  {len(chunks)} chunks stored in {DB_PATH}")
+    print(f"  {len(chunks)} chunks stored in PostgreSQL (tiktok_manager)")
     if audio_path:
-        audio_count = sum(1 for c in chunks if c.get("embedding_audio_blob"))
+        audio_count = sum(1 for c in chunks if c.get("embedding_audio") is not None)
         print(f"  {audio_count} audio embeddings stored")
 
 

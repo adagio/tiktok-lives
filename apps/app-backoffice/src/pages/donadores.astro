@@ -11,8 +11,8 @@ let giftStats: GiftCatalogRow[] = [];
 let error: string | null = null;
 
 try {
-  donors = getGlobalDonors(100);
-  giftStats = getGiftCatalogStats();
+  donors = await getGlobalDonors(100);
+  giftStats = await getGiftCatalogStats();
 } catch (e) {
   error = e instanceof Error ? e.message : "No se pudo conectar a la base de datos";
 }
