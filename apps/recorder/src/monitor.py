@@ -19,6 +19,7 @@ from pathlib import Path
 from subprocess import Popen
 
 from battles import (
+    backfill_battle_id,
     close_orphaned_guests,
     close_orphaned_sessions,
     create_session,
@@ -478,6 +479,13 @@ class Monitor:
                     )
                 except Exception:
                     log.warning("Failed to save battle to DB", exc_info=True)
+                # Retroactively associate recent gifts/messages with this battle
+                try:
+                    g_count, m_count = backfill_battle_id(DB_PATH, sess.session_id, battle_id)
+                    if g_count or m_count:
+                        log.info("⚔️  Backfilled battle_id: %d gifts, %d messages for @%s", g_count, m_count, username)
+                except Exception:
+                    log.debug("Failed to backfill battle_id", exc_info=True)
             else:
                 try:
                     if host_uid:

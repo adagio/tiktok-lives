@@ -161,7 +161,10 @@ def _compute_data_sources(conn: sqlite3.Connection, session_id: int, session_dat
     checks = [
         (DS_CHAT, "SELECT MIN(timestamp), MAX(timestamp) FROM chat_messages WHERE session_id = ?"),
         (DS_GIFTS, "SELECT MIN(timestamp), MAX(timestamp) FROM gifts WHERE session_id = ?"),
-        (DS_BATTLES, "SELECT MIN(detected_at), MAX(detected_at) FROM battles WHERE session_id = ?"),
+        (DS_BATTLES, """SELECT MIN(bv.detected_at), MAX(bv.detected_at)
+                        FROM battle_participants bp
+                        JOIN battles_v2 bv ON bp.battle_id = bv.battle_id
+                        WHERE bp.session_id = ?"""),
         (DS_GUESTS, "SELECT MIN(joined_at), MAX(COALESCE(left_at, joined_at)) FROM guests WHERE session_id = ?"),
         (DS_VIEWERS, "SELECT MIN(joined_at), MAX(joined_at) FROM viewer_joins WHERE session_id = ?"),
     ]
@@ -265,6 +268,37 @@ def update_session_duration(db_path: str, session_id: int, duration_seconds: flo
         conn.close()
 
 
+def _ensure_battles_v2(conn: sqlite3.Connection) -> None:
+    """Create battles_v2 and battle_participants tables if they don't exist."""
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    if "battles_v2" in tables:
+        return
+    conn.execute("""
+        CREATE TABLE battles_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            battle_id INTEGER NOT NULL UNIQUE,
+            detected_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE battle_participants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            battle_id INTEGER NOT NULL REFERENCES battles_v2(battle_id),
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            session_id INTEGER REFERENCES sessions(id),
+            score INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(battle_id, user_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bp_battle_id ON battle_participants(battle_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bp_session_id ON battle_participants(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bp_user_id ON battle_participants(user_id)")
+    conn.commit()
+
+
 def save_battle(
     db_path: str,
     session_id: int | None,
@@ -273,25 +307,42 @@ def save_battle(
     opponent_user_id: int,
     host_score: int = 0,
     opponent_score: int = 0,
+    host_username: str | None = None,
+    host_user_id: int | None = None,
 ) -> None:
-    """Insert a new battle row (or ignore if already exists)."""
+    """Record a battle with both participants (normalized schema)."""
     conn = sqlite3.connect(db_path, timeout=10)
     try:
+        _ensure_battles_v2(conn)
+
+        # Ensure battle exists
         conn.execute(
-            """INSERT OR IGNORE INTO battles
-               (session_id, battle_id, opponent_username, opponent_user_id,
-                host_score, opponent_score, detected_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                session_id,
-                battle_id,
-                opponent_username,
-                opponent_user_id,
-                host_score,
-                opponent_score,
-                datetime.now(timezone.utc).isoformat(),
-            ),
+            "INSERT OR IGNORE INTO battles_v2 (battle_id, detected_at) VALUES (?, ?)",
+            (battle_id, datetime.now(timezone.utc).isoformat()),
         )
+
+        # Upsert host participant
+        if host_user_id and host_username:
+            conn.execute(
+                """INSERT INTO battle_participants (battle_id, user_id, username, session_id, score)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(battle_id, user_id) DO UPDATE SET
+                     session_id = COALESCE(battle_participants.session_id, excluded.session_id),
+                     score = MAX(battle_participants.score, excluded.score),
+                     username = excluded.username""",
+                (battle_id, host_user_id, host_username, session_id, host_score),
+            )
+
+        # Upsert opponent participant
+        conn.execute(
+            """INSERT INTO battle_participants (battle_id, user_id, username, session_id, score)
+               VALUES (?, ?, ?, NULL, ?)
+               ON CONFLICT(battle_id, user_id) DO UPDATE SET
+                 score = MAX(battle_participants.score, excluded.score),
+                 username = excluded.username""",
+            (battle_id, opponent_user_id, opponent_username, opponent_score),
+        )
+
         conn.commit()
     finally:
         conn.close()
@@ -300,17 +351,15 @@ def save_battle(
 def update_battle_scores(
     db_path: str,
     battle_id: int,
-    opponent_user_id: int,
-    host_score: int,
-    opponent_score: int,
+    user_id: int,
+    score: int,
 ) -> None:
-    """Update scores for an existing battle row."""
+    """Update score for a single battle participant."""
     conn = sqlite3.connect(db_path, timeout=10)
     try:
         conn.execute(
-            """UPDATE battles SET host_score = ?, opponent_score = ?
-               WHERE battle_id = ? AND opponent_user_id = ?""",
-            (host_score, opponent_score, battle_id, opponent_user_id),
+            "UPDATE battle_participants SET score = ? WHERE battle_id = ? AND user_id = ?",
+            (score, battle_id, user_id),
         )
         conn.commit()
     finally:
@@ -510,6 +559,35 @@ def save_gifts(db_path: str, gifts: list[dict]) -> None:
 
         _update_gift_catalog(conn, gifts)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def backfill_battle_id(db_path: str, session_id: int, battle_id: int, window_minutes: int = 5) -> tuple[int, int]:
+    """Retroactively associate recent gifts and chat messages with a battle.
+
+    When a battle is first detected, gifts and messages that arrived before
+    the detection (within window_minutes) have battle_id=NULL. This function
+    fills them in.
+
+    Returns (gifts_updated, messages_updated).
+    """
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        cur_g = conn.execute(
+            """UPDATE gifts SET battle_id = ?
+               WHERE session_id = ? AND battle_id IS NULL
+               AND timestamp > datetime('now', ?)""",
+            (battle_id, session_id, f"-{window_minutes} minutes"),
+        )
+        cur_m = conn.execute(
+            """UPDATE chat_messages SET battle_id = ?
+               WHERE session_id = ? AND battle_id IS NULL
+               AND timestamp > datetime('now', ?)""",
+            (battle_id, session_id, f"-{window_minutes} minutes"),
+        )
+        conn.commit()
+        return cur_g.rowcount, cur_m.rowcount
     finally:
         conn.close()
 
