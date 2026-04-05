@@ -153,186 +153,136 @@ const dateDisplay = rawDate instanceof Date ? rawDate.toISOString().split("T")[0
         </div>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left column: Topics + Summary */}
-        <div class="lg:col-span-1 space-y-6">
-          {/* Topic Ranking */}
-          <section class="bg-card rounded-xl border border-border p-5">
-            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Presencia de Topics</h2>
-            {topics.length > 0 ? (
-              <div class="space-y-3">
-                {topics.map((topic) => (
-                  <div>
-                    <div class="flex items-center justify-between mb-1">
-                      <span class="text-sm font-medium text-text-primary">{topic.label}</span>
-                      <span class="text-xs font-mono tabular-nums text-text-muted">{Math.round(topic.normalizedScore)}%</span>
-                    </div>
-                    <div class="h-2.5 rounded-full bg-surface-raised overflow-hidden">
-                      <div
-                        class="h-full rounded-full transition-all duration-500"
-                        style={`width: ${Math.max(topic.normalizedScore, 3)}%; background: ${topic.color};`}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p class="text-sm text-text-muted">Sin embeddings disponibles</p>
-            )}
-          </section>
-
-          {/* Batallas */}
-          <section class="bg-card rounded-xl border border-border p-5">
-            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4 flex items-center gap-2">
-              <span class="text-lg">⚔️</span> Batallas
-              {battles.length > 0 && (
-                <span class="text-text-muted font-normal normal-case text-xs">({battles.length})</span>
-              )}
-            </h2>
-            {battles.length > 0 ? (
-              <div class="space-y-3">
-                {battles.map((b) => {
-                  const won = b.host_score > b.opponent_score;
-                  const lost = b.host_score < b.opponent_score;
-                  const draw = b.host_score === b.opponent_score && (b.host_score > 0 || b.opponent_score > 0);
-                  const resultLabel = won ? "W" : lost ? "L" : draw ? "D" : "";
-                  const resultColor = won
-                    ? "text-emerald-400 bg-emerald-500/15 border-emerald-500/30"
-                    : lost
-                      ? "text-rose-400 bg-rose-500/15 border-rose-500/30"
-                      : "text-amber-400 bg-amber-500/15 border-amber-500/30";
-                  const detectedAt = b.detected_at;
-                  return (
-                    <a href={`/batallas/${b.id}`} class="flex items-center gap-3 p-3 rounded-lg bg-surface-raised/50 border border-border/50 hover:border-brand/30 transition-colors">
-                      {resultLabel && (
-                        <span class={`shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold border ${resultColor}`}>
-                          {resultLabel}
-                        </span>
-                      )}
-                      <div class="min-w-0 flex-1">
-                        <span class="text-sm font-semibold text-text-primary">@{b.opponent_username}</span>
-                        <div class="flex items-center gap-2 mt-0.5">
-                          <span class="text-xs font-mono tabular-nums text-text-secondary">
-                            {b.host_score} — {b.opponent_score}
-                          </span>
-                          {detectedAt && (
-                            <LocalTime utc={detectedAt} fmt="time" class="text-xs text-text-muted" />
-                          )}
-                        </div>
-                      </div>
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4 text-text-muted shrink-0" aria-hidden="true">
-                        <path fill-rule="evenodd" d="M6.22 4.22a.75.75 0 011.06 0l3.25 3.25a.75.75 0 010 1.06l-3.25 3.25a.75.75 0 01-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 010-1.06z" clip-rule="evenodd" />
-                      </svg>
-                    </a>
-                  );
-                })}
-              </div>
-            ) : (
-              <p class="text-sm text-text-muted">Sin batallas detectadas</p>
-            )}
-          </section>
-
-          {/* Ventanilla (guests) */}
-          <section class="bg-card rounded-xl border border-border p-5">
-            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4 flex items-center gap-2">
-              <span class="text-lg">🎙️</span> Ventanilla
-              {guests.length > 0 && (
-                <span class="text-text-muted font-normal normal-case text-xs">({guests.length})</span>
-              )}
-            </h2>
-            {guests.length > 0 ? (
-              <div class="space-y-3">
-                {guests.map((g) => {
-                  const isLive = !g.left_at;
-                  const duration = formatGuestDuration(g.joined_at, g.left_at);
-                  const joinedAt = g.joined_at;
-                  return (
-                    <div class="flex items-center gap-3 p-3 rounded-lg bg-surface-raised/50 border border-border/50 hover:border-border transition-colors">
-                      {isLive && (
-                        <span class="shrink-0 relative flex h-2.5 w-2.5">
-                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                          <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-                        </span>
-                      )}
-                      <div class="min-w-0 flex-1">
-                        <span class="text-sm font-semibold text-text-primary">@{g.username}</span>
-                        <div class="flex items-center gap-2 mt-0.5">
-                          {joinedAt && (
-                            <LocalTime utc={joinedAt} fmt="time" class="text-xs text-text-muted" />
-                          )}
-                          {isLive ? (
-                            <span class="text-xs font-medium text-emerald-400">en vivo</span>
-                          ) : duration && (
-                            <span class="text-xs text-text-muted font-mono tabular-nums">{duration}</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p class="text-sm text-text-muted">Sin invitados en esta sesión</p>
-            )}
-          </section>
-
-          {/* Summary */}
-          <section class="bg-card rounded-xl border border-border p-5">
-            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3">Resumen</h2>
-            {summaryParagraphs.length > 0 ? (
-              <div class="space-y-3">
-                {summaryParagraphs.map((p) => (
-                  <p class="text-sm text-text-secondary leading-relaxed">{p}</p>
-                ))}
-              </div>
-            ) : (
-              <p class="text-sm text-text-muted">Sin resumen disponible</p>
-            )}
-          </section>
-
-          {/* Clips */}
-          {clips.length > 0 && (
-            <section class="bg-card rounded-xl border border-border p-5">
-              <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3">
-                Clips <span class="text-text-muted font-normal normal-case">({clips.length})</span>
-              </h2>
-              <div class="space-y-2">
-                {clips.map((clip) => (
-                  <div class="flex items-center gap-3 p-2 rounded-lg hover:bg-card-hover transition-colors">
-                    <PlayButton
-                      filename={clip.filename}
-                      username={clip.username}
-                      query={clip.query}
-                      text={clip.text}
-                      duration={clip.end_seconds - clip.start_seconds}
-                    />
-                    <div class="min-w-0 flex-1">
-                      <div class="flex items-center gap-2">
-                        <span class="inline-block bg-brand-subtle text-brand rounded-md px-1.5 py-0.5 text-xs font-medium">{clip.query}</span>
-                        <span class="text-xs text-text-muted font-mono tabular-nums">{formatScore(clip.score)}</span>
-                      </div>
-                      <p class="text-xs text-text-secondary mt-0.5 truncate">{clip.text ?? "—"}</p>
-                    </div>
-                    <span class="text-xs text-text-muted tabular-nums whitespace-nowrap">
-                      {formatTime(clip.start_seconds)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </section>
+      {/* Tab bar */}
+      <div class="flex gap-1 border-b border-border mb-6 overflow-x-auto" id="session-tabs">
+        <button data-tab="general" class="session-tab active">
+          General
+        </button>
+        <button data-tab="transcript" class="session-tab">
+          Transcripción
+          <span class="tab-badge">{chunks.length}</span>
+        </button>
+        <button data-tab="chat" class="session-tab">
+          💬 Chat
+          <span id="chat-count" class="tab-badge">{chatMessages.length}</span>
+          {chatActive && (
+            <span id="chat-live-badge" class="chat-live-badge">
+              <span class="chat-live-dot" />
+              EN VIVO
+            </span>
           )}
-        </div>
+        </button>
+        <button data-tab="battles" class="session-tab">
+          ⚔️ Batallas
+          <span class="tab-badge">{battles.length}</span>
+        </button>
+        <button data-tab="ventanilla" class="session-tab">
+          🎙️ Ventanilla
+          <span class="tab-badge">{guests.length}</span>
+        </button>
+      </div>
 
-        {/* Right column: Transcript */}
-        <section class="lg:col-span-2 bg-card rounded-xl border border-border">
-          <div class="p-5 border-b border-border">
-            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider">
-              Transcripción <span class="text-text-muted font-normal normal-case">({chunks.length} fragmentos)</span>
-            </h2>
+      {/* ═══ Tab: General ═══ */}
+      <div id="panel-general" class="tab-panel">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="lg:col-span-2 space-y-6">
+            {/* Summary */}
+            <section class="bg-card rounded-xl border border-border p-5">
+              <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3">Resumen</h2>
+              {summaryParagraphs.length > 0 ? (
+                <div class="space-y-3">
+                  {summaryParagraphs.map((p) => (
+                    <p class="text-sm text-text-secondary leading-relaxed">{p}</p>
+                  ))}
+                </div>
+              ) : (
+                <p class="text-sm text-text-muted">Sin resumen disponible</p>
+              )}
+            </section>
+
+            {/* Clips */}
+            {clips.length > 0 && (
+              <section class="bg-card rounded-xl border border-border p-5">
+                <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3">
+                  Clips <span class="text-text-muted font-normal normal-case">({clips.length})</span>
+                </h2>
+                <div class="space-y-2">
+                  {clips.map((clip) => (
+                    <div class="flex items-center gap-3 p-2 rounded-lg hover:bg-card-hover transition-colors">
+                      <PlayButton
+                        filename={clip.filename}
+                        username={clip.username}
+                        query={clip.query}
+                        text={clip.text}
+                        duration={clip.end_seconds - clip.start_seconds}
+                      />
+                      <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-2">
+                          <span class="inline-block bg-brand-subtle text-brand rounded-md px-1.5 py-0.5 text-xs font-medium">{clip.query}</span>
+                          <span class="text-xs text-text-muted font-mono tabular-nums">{formatScore(clip.score)}</span>
+                        </div>
+                        <p class="text-xs text-text-secondary mt-0.5 truncate">{clip.text ?? "—"}</p>
+                      </div>
+                      <span class="text-xs text-text-muted tabular-nums whitespace-nowrap">
+                        {formatTime(clip.start_seconds)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
-          <div class="divide-y divide-border max-h-[70vh] overflow-y-auto">
+
+          <div class="space-y-6">
+            {/* Topic Ranking */}
+            <section class="bg-card rounded-xl border border-border p-5">
+              <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-4">Presencia de Topics</h2>
+              {topics.length > 0 ? (
+                <div class="space-y-3">
+                  {topics.map((topic) => (
+                    <div>
+                      <div class="flex items-center justify-between mb-1">
+                        <span class="text-sm font-medium text-text-primary">{topic.label}</span>
+                        <span class="text-xs font-mono tabular-nums text-text-muted">{Math.round(topic.normalizedScore)}%</span>
+                      </div>
+                      <div class="h-2.5 rounded-full bg-surface-raised overflow-hidden">
+                        <div
+                          class="h-full rounded-full transition-all duration-500"
+                          style={`width: ${Math.max(topic.normalizedScore, 3)}%; background: ${topic.color};`}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p class="text-sm text-text-muted">Sin embeddings disponibles</p>
+              )}
+            </section>
+
+            {/* Chat analysis summary (compact) */}
+            {chatAnalysis && (
+              <section class="bg-card rounded-xl border border-border p-5">
+                <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3">Análisis de Chat</h2>
+                <p class="text-sm text-text-secondary leading-relaxed mb-3">{chatAnalysis.summary}</p>
+                <div class="flex flex-wrap gap-1.5">
+                  {chatAnalysis.topics.map((topic) => (
+                    <span class="inline-block text-xs font-medium px-2.5 py-1 rounded-full bg-brand-subtle text-brand border border-brand/20">
+                      {topic}
+                    </span>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ═══ Tab: Transcripción ═══ */}
+      <div id="panel-transcript" class="tab-panel hidden">
+        <div class="bg-card rounded-xl border border-border">
+          <div class="divide-y divide-border max-h-[75vh] overflow-y-auto">
             {chunks.map((chunk) => (
-              <div class="px-5 py-3 hover:bg-card-hover transition-colors group">
+              <div class="px-5 py-3 hover:bg-card-hover transition-colors">
                 <div class="flex items-start gap-3">
                   <span class="text-xs font-mono text-text-muted tabular-nums pt-0.5 w-14 shrink-0">
                     {formatTime(chunk.start_seconds)}
@@ -347,22 +297,12 @@ const dateDisplay = rawDate instanceof Date ? rawDate.toISOString().split("T")[0
               </div>
             )}
           </div>
-        </section>
+        </div>
+      </div>
 
-        {/* Chat */}
-        <section class="lg:col-span-2 bg-card rounded-xl border border-border">
-          <div class="p-5 border-b border-border flex items-center gap-3">
-            <span class="text-lg">💬</span>
-            <h2 class="text-sm font-semibold text-text-primary uppercase tracking-wider">
-              Chat <span id="chat-count" class="text-text-muted font-normal normal-case">({chatMessages.length} mensajes)</span>
-            </h2>
-            {chatActive && (
-              <span id="chat-live-badge" class="chat-live-badge">
-                <span class="chat-live-dot" />
-                EN VIVO
-              </span>
-            )}
-          </div>
+      {/* ═══ Tab: Chat ═══ */}
+      <div id="panel-chat" class="tab-panel hidden">
+        <div class="bg-card rounded-xl border border-border">
           {chatAnalysis && (
             <div class="px-5 py-4 border-b border-border space-y-3">
               <p class="text-sm text-text-secondary leading-relaxed">{chatAnalysis.summary}</p>
@@ -376,7 +316,7 @@ const dateDisplay = rawDate instanceof Date ? rawDate.toISOString().split("T")[0
             </div>
           )}
 
-          <div id="chat-panel" class="max-h-[50vh] overflow-y-auto p-3 space-y-1 chat-panel">
+          <div id="chat-panel" class="max-h-[65vh] overflow-y-auto p-3 space-y-1 chat-panel">
             {chatMessages.length > 0 ? chatMessages.map((msg) => (
               <div class="chat-msg">
                 <time data-utc={msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp} data-fmt="time" class="chat-ts">{(msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp).split("T")[1]?.slice(0, 5) ?? ""}</time>
@@ -388,26 +328,156 @@ const dateDisplay = rawDate instanceof Date ? rawDate.toISOString().split("T")[0
             )}
           </div>
 
-          {/* Update line — latest status event */}
           <div id="update-line" class="update-line">
             {latestJoin && (
               <span>👋 {latestJoin.username} se unió</span>
             )}
           </div>
 
-          {/* Hidden data for polling */}
           <div id="session-chat-data" class="hidden"
             data-session-id={id}
             data-active={chatActive ? "true" : "false"}
             data-last-ts={lastChatTimestamp}
           />
-        </section>
+        </div>
+      </div>
+
+      {/* ═══ Tab: Batallas ═══ */}
+      <div id="panel-battles" class="tab-panel hidden">
+        <div class="bg-card rounded-xl border border-border p-5">
+          {battles.length > 0 ? (
+            <div class="space-y-3">
+              {battles.map((b) => {
+                const won = b.host_score > b.opponent_score;
+                const lost = b.host_score < b.opponent_score;
+                const draw = b.host_score === b.opponent_score && (b.host_score > 0 || b.opponent_score > 0);
+                const resultLabel = won ? "W" : lost ? "L" : draw ? "D" : "";
+                const resultColor = won
+                  ? "text-emerald-400 bg-emerald-500/15 border-emerald-500/30"
+                  : lost
+                    ? "text-rose-400 bg-rose-500/15 border-rose-500/30"
+                    : "text-amber-400 bg-amber-500/15 border-amber-500/30";
+                const detectedAt = b.detected_at;
+                return (
+                  <a href={`/batallas/${b.id}`} class="flex items-center gap-3 p-3 rounded-lg bg-surface-raised/50 border border-border/50 hover:border-brand/30 transition-colors">
+                    {resultLabel && (
+                      <span class={`shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold border ${resultColor}`}>
+                        {resultLabel}
+                      </span>
+                    )}
+                    <div class="min-w-0 flex-1">
+                      <span class="text-sm font-semibold text-text-primary">@{b.opponent_username}</span>
+                      <div class="flex items-center gap-2 mt-0.5">
+                        <span class="text-xs font-mono tabular-nums text-text-secondary">
+                          {b.host_score} — {b.opponent_score}
+                        </span>
+                        {detectedAt && (
+                          <LocalTime utc={detectedAt} fmt="time" class="text-xs text-text-muted" />
+                        )}
+                      </div>
+                    </div>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="w-4 h-4 text-text-muted shrink-0" aria-hidden="true">
+                      <path fill-rule="evenodd" d="M6.22 4.22a.75.75 0 011.06 0l3.25 3.25a.75.75 0 010 1.06l-3.25 3.25a.75.75 0 01-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 010-1.06z" clip-rule="evenodd" />
+                    </svg>
+                  </a>
+                );
+              })}
+            </div>
+          ) : (
+            <p class="text-sm text-text-muted text-center py-8">Sin batallas detectadas en esta sesión</p>
+          )}
+        </div>
+      </div>
+
+      {/* ═══ Tab: Ventanilla ═══ */}
+      <div id="panel-ventanilla" class="tab-panel hidden">
+        <div class="bg-card rounded-xl border border-border p-5">
+          {guests.length > 0 ? (
+            <div class="space-y-3">
+              {guests.map((g) => {
+                const isLive = !g.left_at;
+                const duration = formatGuestDuration(g.joined_at, g.left_at);
+                const joinedAt = g.joined_at;
+                return (
+                  <div class="flex items-center gap-3 p-3 rounded-lg bg-surface-raised/50 border border-border/50 hover:border-border transition-colors">
+                    {isLive && (
+                      <span class="shrink-0 relative flex h-2.5 w-2.5">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                      </span>
+                    )}
+                    <div class="min-w-0 flex-1">
+                      <span class="text-sm font-semibold text-text-primary">@{g.username}</span>
+                      <div class="flex items-center gap-2 mt-0.5">
+                        {joinedAt && (
+                          <LocalTime utc={joinedAt} fmt="time" class="text-xs text-text-muted" />
+                        )}
+                        {isLive ? (
+                          <span class="text-xs font-medium text-emerald-400">en vivo</span>
+                        ) : duration && (
+                          <span class="text-xs text-text-muted font-mono tabular-nums">{duration}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p class="text-sm text-text-muted text-center py-8">Sin invitados en esta sesión</p>
+          )}
+        </div>
       </div>
     </>
   )}
 </Layout>
 
 <style>
+  .session-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 18px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--color-text-muted);
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    cursor: pointer;
+    background: none;
+    white-space: nowrap;
+    transition: color 0.15s, border-color 0.15s;
+  }
+
+  .session-tab:hover {
+    color: var(--color-text-secondary);
+  }
+
+  .session-tab.active {
+    color: var(--color-text-primary);
+    border-bottom-color: var(--color-brand);
+  }
+
+  .tab-badge {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    background: var(--color-surface-raised);
+    padding: 1px 7px;
+    border-radius: 9999px;
+  }
+
+  .session-tab.active .tab-badge {
+    background: var(--color-brand-subtle);
+    color: var(--color-brand);
+  }
+
+  .tab-panel.hidden {
+    display: none;
+  }
+
   .chat-live-badge {
     display: inline-flex;
     align-items: center;
@@ -496,6 +566,26 @@ const dateDisplay = rawDate instanceof Date ? rawDate.toISOString().split("T")[0
     to { opacity: 1; transform: translateY(0); }
   }
 </style>
+
+<script is:inline>
+(function() {
+  var tabs = document.querySelectorAll('.session-tab');
+  tabs.forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      var target = tab.dataset.tab;
+      tabs.forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.add('hidden'); });
+      var panel = document.getElementById('panel-' + target);
+      if (panel) panel.classList.remove('hidden');
+      if (target === 'chat') {
+        var chatPanel = document.getElementById('chat-panel');
+        if (chatPanel) chatPanel.scrollTop = chatPanel.scrollHeight;
+      }
+    });
+  });
+})();
+</script>
 
 <script is:inline>
 (function() {
