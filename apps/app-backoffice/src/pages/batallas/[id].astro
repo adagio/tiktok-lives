@@ -143,7 +143,7 @@ function formatGuestDuration(joinedAt: string, leftAt: string | null): string | 
           <div id="chat-host" class="flex-1 overflow-y-auto p-3 space-y-1 chat-panel" data-room={battle.host_username}>
             {hostMessages.length > 0 ? hostMessages.map((msg) => (
               <div class="chat-msg">
-                <time data-utc={msg.timestamp} data-fmt="time" class="chat-ts">{msg.timestamp.split("T")[1]?.slice(0, 5) ?? ""}</time>
+                <time data-utc={msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp} data-fmt="time" class="chat-ts">{(msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp).split("T")[1]?.slice(0, 5) ?? ""}</time>
                 <span class="chat-user">{msg.username}</span>
                 <span class="chat-text">{msg.text}</span>
               </div>
@@ -168,7 +168,7 @@ function formatGuestDuration(joinedAt: string, leftAt: string | null): string | 
           <div id="chat-opponent" class="flex-1 overflow-y-auto p-3 space-y-1 chat-panel" data-room={battle.opponent_username}>
             {opponentMessages.length > 0 ? opponentMessages.map((msg) => (
               <div class="chat-msg">
-                <time data-utc={msg.timestamp} data-fmt="time" class="chat-ts">{msg.timestamp.split("T")[1]?.slice(0, 5) ?? ""}</time>
+                <time data-utc={msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp} data-fmt="time" class="chat-ts">{(msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp).split("T")[1]?.slice(0, 5) ?? ""}</time>
                 <span class="chat-user">{msg.username}</span>
                 <span class="chat-text">{msg.text}</span>
               </div>

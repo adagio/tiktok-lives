@@ -121,7 +121,8 @@ const lastChatTimestamp = chatMessages.length > 0
   ? chatMessages[chatMessages.length - 1].timestamp
   : "";
 
-const dateDisplay = session?.date?.split("T")[0] ?? "";
+const rawDate = session?.date;
+const dateDisplay = rawDate instanceof Date ? rawDate.toISOString().split("T")[0] : rawDate?.split?.("T")[0] ?? "";
 ---
 
 <Layout title={session ? `${session.username} — ${dateDisplay}` : "Sesión"}>
@@ -378,7 +379,7 @@ const dateDisplay = session?.date?.split("T")[0] ?? "";
           <div id="chat-panel" class="max-h-[50vh] overflow-y-auto p-3 space-y-1 chat-panel">
             {chatMessages.length > 0 ? chatMessages.map((msg) => (
               <div class="chat-msg">
-                <time data-utc={msg.timestamp} data-fmt="time" class="chat-ts">{msg.timestamp.split("T")[1]?.slice(0, 5) ?? ""}</time>
+                <time data-utc={msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp} data-fmt="time" class="chat-ts">{(msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp).split("T")[1]?.slice(0, 5) ?? ""}</time>
                 <span class="chat-user">{msg.username}</span>
                 <span class="chat-text">{msg.text}</span>
               </div>

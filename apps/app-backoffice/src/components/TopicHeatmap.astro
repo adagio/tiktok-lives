@@ -27,7 +27,7 @@ const sessions = Array.from(sessionMap.entries()).map(([id, s]) => ({
   id,
   username: s.username,
   dateRaw: s.date,
-  date: s.date.split("T")[0],
+  date: (s.date instanceof Date ? s.date.toISOString() : s.date).split("T")[0],
   scores: s.scores,
 }));
 
